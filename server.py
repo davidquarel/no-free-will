@@ -38,13 +38,16 @@ MODELS = [
     {"id": "Qwen/Qwen3-0.6B-Base", "label": "Qwen3 0.6B base · ~1.4GB bf16"},
     {"id": "Qwen/Qwen3-1.7B-Base", "label": "Qwen3 1.7B base · ~3.8GB bf16"},
     {"id": "Qwen/Qwen3-4B-Base", "label": "Qwen3 4B base · ~8GB bf16 (recommended)"},
-    {"id": "Qwen/Qwen3-8B-Base", "label": "Qwen3 8B base · ~5.5GB (4-bit — quantized)", "quant": "4bit"},
-    {"id": "Qwen/Qwen3-14B-Base", "label": "Qwen3 14B base · ~9GB (4-bit — quantized)", "quant": "4bit"},
-    # Alternative / larger base models. 7B–8B only fit 16GB in 4-bit.
+    # 7B–8B run in 8-bit (LLM.int8) — ~near-lossless and fits 16GB with headroom,
+    # unlike 4-bit. Only 14B still needs 4-bit (8-bit 14B is ~14GB, too tight).
+    {"id": "Qwen/Qwen3-8B-Base", "label": "Qwen3 8B base · ~8.5GB (8-bit)", "quant": "8bit"},
+    {"id": "Qwen/Qwen3-14B-Base", "label": "Qwen3 14B base · ~9GB (4-bit)", "quant": "4bit"},
+    # Alternative / larger base models. 7B fits 16GB in full bf16 (~14GB) now
+    # that we don't materialize fp32 logits; 8B needs 8-bit to leave headroom.
     {"id": "openbmb/MiniCPM5-1B", "label": "MiniCPM5 1B base · bf16"},
-    {"id": "Qwen/Qwen2.5-7B", "label": "Qwen2.5 7B base · 4-bit", "quant": "4bit"},
-    {"id": "tiiuae/Falcon3-7B-Base", "label": "Falcon3 7B base · 4-bit", "quant": "4bit"},
-    {"id": "meta-llama/Llama-3.1-8B", "label": "Llama 3.1 8B base · 4-bit (gated; needs HF token)", "quant": "4bit"},
+    {"id": "Qwen/Qwen2.5-7B", "label": "Qwen2.5 7B base · ~14GB bf16 (full precision)"},
+    {"id": "tiiuae/Falcon3-7B-Base", "label": "Falcon3 7B base · ~14GB bf16 (full precision)"},
+    {"id": "meta-llama/Llama-3.1-8B", "label": "Llama 3.1 8B base · ~8.5GB (8-bit; gated)", "quant": "8bit"},
     {"id": "google/gemma-4-E4B", "label": "Gemma 4 E4B · experimental (multimodal — may not load)"},
     {"id": "mock", "label": "Mock (no GPU — UI test)"},
 ]
@@ -232,6 +235,51 @@ async def ws(socket: WebSocket):
         return
     finally:
         clients.discard(socket)
+
+
+def _gpu_frame() -> str:
+    """One nvtop-style snapshot via gpustat (nvml). Real nvtop is a TUI and
+    can't be piped to a browser, so we render per-GPU util/mem/temp + a bar +
+    the compute processes ourselves."""
+    try:
+        import gpustat
+
+        stats = gpustat.GPUStatCollection.new_query()
+        lines = []
+        for g in stats.gpus:
+            used, total = int(g.memory_used), int(g.memory_total)
+            frac = used / total if total else 0.0
+            fill = int(frac * 28)
+            bar = "█" * fill + "░" * (28 - fill)
+            util = g.utilization if g.utilization is not None else "?"
+            temp = g.temperature if g.temperature is not None else "?"
+            lines.append(f"GPU {g.index}  {g.entry.get('name', '')}")
+            lines.append(f"  util {str(util):>3}%   temp {str(temp):>3}°C   mem {used:>6} / {total} MiB")
+            lines.append(f"  [{bar}] {frac * 100:4.1f}%")
+            procs = g.processes or []
+            if procs:
+                parts = [
+                    f"{p.get('pid')}:{p.get('gpu_memory_usage', '?')}MiB"
+                    + (f"({p['command']})" if p.get("command") else "")
+                    for p in procs[:6]
+                ]
+                lines.append("  procs  " + "  ".join(parts))
+        return "\n".join(lines) or "(no GPU data)"
+    except Exception as exc:
+        return f"gpu monitor unavailable: {type(exc).__name__}: {exc}"
+
+
+@app.websocket("/gpu")
+async def gpu(socket: WebSocket):
+    """Push a fresh GPU snapshot ~once a second; the client replaces the panel
+    each frame (a live gauge rather than a scrolling log)."""
+    await socket.accept()
+    try:
+        while True:
+            await socket.send_text(await asyncio.to_thread(_gpu_frame))
+            await asyncio.sleep(1.0)
+    except (WebSocketDisconnect, RuntimeError):
+        return
 
 
 @app.websocket("/logs")

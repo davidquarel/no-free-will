@@ -56,12 +56,21 @@
     </aside>
   </main>
 
-  <section class="logs">
-    <div class="logs-bar">
-      <span>server log</span>
-      <span class="logs-status" id="logstatus">connecting…</span>
+  <section class="terminals">
+    <div class="term-col">
+      <div class="logs-bar">
+        <span>GPU · live</span>
+        <span class="logs-status" id="gpustatus">connecting…</span>
+      </div>
+      <pre id="gputerm" class="logterm gputerm" aria-live="off"></pre>
     </div>
-    <pre id="logterm" class="logterm" aria-live="off"></pre>
+    <div class="term-col">
+      <div class="logs-bar">
+        <span>server log</span>
+        <span class="logs-status" id="logstatus">connecting…</span>
+      </div>
+      <pre id="logterm" class="logterm" aria-live="off"></pre>
+    </div>
   </section>
 
   <script src="app.js"></script>

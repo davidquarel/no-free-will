@@ -182,12 +182,13 @@ class HFPredictor(BasePredictor):
             # Correct 0-based positions for each (left-padded) row.
             position_ids = (attn.long().cumsum(-1) - 1).clamp(min=0)
 
-            # Upcast logits to fp32 before softmax for stable probabilities even
-            # when the model runs in bf16/fp16/4-bit.
+            # Keep the (B, S, vocab) logits in the model's dtype — upcasting the
+            # whole tensor to fp32 would cost gigabytes for a 150k vocab and is
+            # what tips a 7B/8B model over 16GB. log_softmax is per-row, so we
+            # upcast only the individual rows we actually read, below.
             logits = self.model(
                 input_ids=input_ids, attention_mask=attn, position_ids=position_ids
-            ).logits.float()  # (B, S, vocab)
-            logprobs = torch.log_softmax(logits, dim=-1)
+            ).logits  # (B, S, vocab), model dtype
 
             offset = 1 if self.prefix_id is not None else 0
             out = []
@@ -196,7 +197,7 @@ class HFPredictor(BasePredictor):
                 pad_b = S - len(full)
 
                 # --- top-k prediction for the NEXT token (last position) ---
-                last = logprobs[b, -1]
+                last = torch.log_softmax(logits[b, -1].float(), dim=-1)
                 top = torch.topk(last, min(k, last.shape[-1]))
                 predictions = [
                     {"token": self._decode(int(tid)), "prob": float(math.exp(lp))}
@@ -212,9 +213,11 @@ class HFPredictor(BasePredictor):
                     if j < 0:
                         tokens.append({"text": self._decode(tid), "prob": None, "rank": None})
                         continue
-                    row = logprobs[b, pad_b + j]
-                    lp = float(row[tid])
-                    rank = int((row > row[tid]).sum().item())  # tokens strictly more likely
+                    row = logits[b, pad_b + j]  # (vocab,), model dtype
+                    lp = float(torch.log_softmax(row.float(), dim=-1)[tid])
+                    # rank = tokens strictly more likely; softmax is monotonic so
+                    # comparing raw logits gives the same ordering.
+                    rank = int((row > row[tid]).sum().item())
                     tokens.append(
                         {"text": self._decode(tid), "prob": float(math.exp(lp)), "rank": rank}
                     )

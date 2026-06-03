@@ -270,6 +270,23 @@ function connectLogs() {
   ls.onerror = () => (logstatus.textContent = "log stream error");
 }
 
+// --- live GPU monitor (replace each frame; it's a gauge, not a log) -----
+const gputerm = document.getElementById("gputerm");
+const gpustatus = document.getElementById("gpustatus");
+
+function connectGpu() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const gs = new WebSocket(`${proto}://${location.host}/gpu`);
+  gs.onopen = () => (gpustatus.textContent = "live");
+  gs.onmessage = (ev) => (gputerm.textContent = ev.data); // overwrite each frame
+  gs.onclose = () => {
+    gpustatus.textContent = "disconnected · retrying…";
+    setTimeout(connectGpu, 2000);
+  };
+  gs.onerror = () => (gpustatus.textContent = "gpu stream error");
+}
+
 renderTyping(input.value);
 connect();
 connectLogs();
+connectGpu();
