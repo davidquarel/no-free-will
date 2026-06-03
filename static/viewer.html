@@ -27,6 +27,8 @@
       font-family: var(--mono); font-size: 12px; color: var(--muted);
     }
     .hdr-right { display: flex; gap: 8px; align-items: center; }
+    .score { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .flag { font-size: 16px; }
     .del { background: none; border: 0; color: #f85149; cursor: pointer;
       font-size: 14px; line-height: 1; padding: 0 2px; display: none; }
     .del.show { display: inline; }
@@ -78,13 +80,14 @@
     function escapeHtml(s) {
       return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
-    function panelFor(id, ip) {
+    function panelFor(id, flag) {
       if (panels[id]) return panels[id];
       const el = document.createElement("section");
       el.className = "conv";
       el.innerHTML =
-        `<div class="conv-head"><span>${id}</span>` +
-        `<span class="hdr-right"><span>${ip || ""}</span>` +
+        `<div class="conv-head">` +
+        `<span>${id} <span class="score" title="words fully predicted">—</span></span>` +
+        `<span class="hdr-right"><span class="flag" title="approx. location">${flag || "🌐"}</span>` +
         `<button class="del${unlocked ? " show" : ""}" title="delete this conversation">✕</button>` +
         `</span></div><pre class="conv-body"></pre>`;
       grid.appendChild(el);
@@ -93,9 +96,29 @@
           sock.send(JSON.stringify({ action: "delete", id, password: adminPw }));
         }
       });
-      panels[id] = { el, body: el.querySelector(".conv-body") };
+      panels[id] = {
+        el, body: el.querySelector(".conv-body"),
+        score: el.querySelector(".score"), flag: el.querySelector(".flag"),
+      };
       refresh();
       return panels[id];
+    }
+
+    function setFlag(id, flag) {
+      const p = panels[id];
+      if (p && flag) p.flag.textContent = flag;
+    }
+
+    function setScore(id, score) {
+      const p = panels[id];
+      if (!p) return;
+      if (score == null) {
+        p.score.textContent = "—";
+        p.score.style.color = "";
+      } else {
+        p.score.textContent = Math.round(score * 100) + "%";
+        p.score.style.color = `hsl(${Math.round(120 * score)}, 70%, 62%)`; // red→green
+      }
     }
 
     unlockEl.addEventListener("click", () => {
@@ -126,12 +149,16 @@
         if (d.error) { aStatus.textContent = d.error; aStatus.className = "err"; return; }
         if (d.type === "snapshot") {
           for (const id of Object.keys(panels)) { panels[id].el.remove(); delete panels[id]; }
-          for (const s of d.sessions) { panelFor(s.id, s.ip); setText(s.id, s.text); }
+          for (const s of d.sessions) { panelFor(s.id, s.flag); setText(s.id, s.text); setScore(s.id, s.score); }
           refresh();
         } else if (d.type === "open") {
-          panelFor(d.id, d.ip); setText(d.id, "");
+          panelFor(d.id, d.flag); setText(d.id, "");
         } else if (d.type === "update") {
           panelFor(d.id); setText(d.id, d.text);
+        } else if (d.type === "score") {
+          setScore(d.id, d.score);
+        } else if (d.type === "flag") {
+          setFlag(d.id, d.flag);
         } else if (d.type === "close") {
           const p = panels[d.id];
           if (p) { p.el.remove(); delete panels[d.id]; refresh(); }

@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import os
+import urllib.request
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -206,6 +207,54 @@ async def _viewer_broadcast(event: dict) -> None:
             viewers.discard(v)
 
 
+# Coarse IP -> country flag, so the viewer shows "where", not a precise IP.
+_geo_cache: dict[str, str | None] = {}
+
+
+def _client_ip(socket: WebSocket) -> str:
+    """Real client IP — behind the cloudflare tunnel the socket sees localhost,
+    so prefer the forwarded headers."""
+    h = socket.headers
+    fwd = h.get("cf-connecting-ip") or h.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return socket.client.host if socket.client else "?"
+
+
+def _geo_country(ip: str) -> str | None:
+    """ISO country code for an IP (cached). None for private/loopback/unknown."""
+    if ip in _geo_cache:
+        return _geo_cache[ip]
+    cc = None
+    try:
+        if ip not in ("?", "127.0.0.1", "::1") and not ip.startswith(("10.", "192.168.", "172.")):
+            url = f"http://ip-api.com/json/{ip}?fields=status,countryCode"
+            with urllib.request.urlopen(url, timeout=3) as r:
+                d = json.loads(r.read().decode())
+            if d.get("status") == "success":
+                cc = d.get("countryCode")
+    except Exception:
+        cc = None
+    _geo_cache[ip] = cc
+    return cc
+
+
+def _flag(country_code: str | None) -> str:
+    """Country code -> flag emoji (regional indicator letters). 🌐 if unknown."""
+    if not country_code or len(country_code) != 2 or not country_code.isalpha():
+        return "🌐"
+    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in country_code.upper())
+
+
+async def _geolocate_session(sid: str, ip: str) -> None:
+    cc = await asyncio.to_thread(_geo_country, ip)
+    s = sessions.get(sid)
+    if s is None:
+        return
+    s["flag"] = _flag(cc)
+    await _viewer_broadcast({"type": "flag", "id": sid, "flag": s["flag"]})
+
+
 def _session_open(ip: str, socket: WebSocket) -> str:
     global _session_seq
     _session_seq += 1
@@ -216,8 +265,38 @@ def _session_open(ip: str, socket: WebSocket) -> str:
         f = open(path, "w", encoding="utf-8")
     except Exception:
         f, path = None, None
-    sessions[sid] = {"text": "", "ip": ip, "file": f, "path": path, "socket": socket}
+    # Keep ip only internally (for geolocation); the viewer never sees it.
+    sessions[sid] = {
+        "text": "", "ip": ip, "flag": "🌐", "file": f, "path": path,
+        "socket": socket, "score": None,
+    }
     return sid
+
+
+def _word_accuracy(tokens: list) -> float | None:
+    """Fraction of words the model fully predicted (every token its #1 guess),
+    matching the frontend: a new word starts at a whitespace-leading token; a
+    word counts if it has non-whitespace + a scored token, and is correct only
+    if all its scored tokens have rank 0. Returns None if nothing scorable."""
+    words: list[list] = []
+    cur = None
+    for t in tokens:
+        txt = t.get("text", "")
+        if cur is None or txt[:1].isspace():
+            cur = []
+            words.append(cur)
+        cur.append(t)
+    total = hits = 0
+    for w in words:
+        if not any(tok.get("text", "").strip() for tok in w):
+            continue
+        scored = [tok for tok in w if tok.get("rank") is not None]
+        if not scored:
+            continue
+        total += 1
+        if all(tok.get("rank") == 0 for tok in scored):
+            hits += 1
+    return hits / total if total else None
 
 
 async def _clear_session(sid: str) -> None:
@@ -324,7 +403,10 @@ async def sessions_ws(socket: WebSocket):
     viewers.add(socket)
     await socket.send_text(json.dumps({
         "type": "snapshot",
-        "sessions": [{"id": sid, "ip": s["ip"], "text": s["text"]} for sid, s in sessions.items()],
+        "sessions": [
+            {"id": sid, "flag": s.get("flag", "🌐"), "text": s["text"], "score": s.get("score")}
+            for sid, s in sessions.items()
+        ],
     }))
     try:
         while True:
@@ -353,9 +435,10 @@ async def ws(socket: WebSocket):
     await socket.accept()
     engine.start()  # idempotent; ensures the worker runs on the live event loop
     clients.add(socket)
-    ip = socket.client.host if socket.client else "?"
+    ip = _client_ip(socket)
     sid = _session_open(ip, socket)  # one streaming file per active user
-    await _viewer_broadcast({"type": "open", "id": sid, "ip": ip})
+    await _viewer_broadcast({"type": "open", "id": sid, "flag": sessions[sid]["flag"]})
+    asyncio.create_task(_geolocate_session(sid, ip))  # resolve the flag in the background
     await socket.send_text(
         json.dumps({
             "models": MODELS, "default": DEFAULT_MODEL,
@@ -442,6 +525,12 @@ async def ws(socket: WebSocket):
 
             result["seq"] = seq
             await socket.send_text(json.dumps(result))
+
+            # Update this user's live word-prediction score for the viewer page.
+            score = _word_accuracy(result.get("tokens", []))
+            if sid in sessions:
+                sessions[sid]["score"] = score
+            await _viewer_broadcast({"type": "score", "id": sid, "score": score})
     except WebSocketDisconnect:
         return
     finally:
