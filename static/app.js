@@ -20,6 +20,8 @@ const modelNow = document.getElementById("modelnow");
 const adminPass = document.getElementById("adminpass");
 const adminUnlock = document.getElementById("adminunlock");
 const adminStatus = document.getElementById("adminstatus");
+const maxTokensInput = document.getElementById("maxtokens");
+const maxTokensApply = document.getElementById("maxtokensapply");
 
 let seq = 0;          // monotonically increasing request id
 let lastRenderedSeq = -1;
@@ -114,8 +116,12 @@ function renderResult(data) {
   const atEnd =
     input.selectionStart === current.length &&
     input.selectionEnd === current.length;
+  // When the text was truncated, the prediction is for the cut point, not the
+  // real end — don't show a misleading ghost.
+  const truncated = data.n_tokens_total > data.max_tokens;
   const preds = data.predictions || [];
-  ghost.textContent = atEnd && current.length && preds.length ? preds[0].token : "";
+  ghost.textContent =
+    !truncated && atEnd && current.length && preds.length ? preds[0].token : "";
 
   renderPredictions(preds);
   renderAccuracy(tokens);
@@ -135,13 +141,29 @@ function renderPredictions(preds) {
 }
 
 function renderAccuracy(tokens) {
-  const scored = tokens.filter((t) => t.rank != null);
-  if (!scored.length) {
-    accuracyEl.textContent = "—";
-    return;
+  // Word-level accuracy: group tokens into words (a new word begins at a token
+  // that starts with whitespace, or at the very start), then a word counts as
+  // correct only if EVERY scored token in it was the model's #1 guess. A
+  // multi-token word has to be guessed right all the way through.
+  const words = [];
+  let cur = null;
+  for (const t of tokens) {
+    if (cur === null || /^\s/.test(t.text)) {
+      cur = [];
+      words.push(cur);
+    }
+    cur.push(t);
   }
-  const hits = scored.filter((t) => t.rank === 0).length;
-  accuracyEl.textContent = Math.round((hits / scored.length) * 100) + "%";
+  let total = 0;
+  let hits = 0;
+  for (const w of words) {
+    const hasText = w.some((t) => /\S/.test(t.text));
+    const scored = w.filter((t) => t.rank != null);
+    if (!hasText || !scored.length) continue; // skip whitespace / unscorable
+    total += 1;
+    if (scored.every((t) => t.rank === 0)) hits += 1;
+  }
+  accuracyEl.textContent = total ? Math.round((hits / total) * 100) + "%" : "—";
 }
 
 // --- networking ---------------------------------------------------------
@@ -217,22 +239,26 @@ function connect() {
     if (data.models) {
       populateModels(data.models, data.current || data.default);
       setCurrentModel(data.current || data.default);
+      if (data.max_tokens) maxTokensInput.value = data.max_tokens;
       setStatus("connected", "ok");
       send(); // prime predictions for whatever is already in the box
       return;
     }
+    if (data.max_tokens_changed) {
+      maxTokensInput.value = data.max_tokens_changed;
+      setStatus(`token cap: ${data.max_tokens_changed}`, "ok");
+      return;
+    }
     if (typeof data.admin_ok === "boolean") {
-      if (data.admin_ok) {
-        adminPassword = adminPass.value;
-        modelSelect.disabled = false;
-        adminStatus.textContent = "unlocked — you can switch the model";
-        adminStatus.className = "admin-status ok";
-      } else {
-        adminPassword = null;
-        modelSelect.disabled = true;
-        adminStatus.textContent = "wrong password";
-        adminStatus.className = "admin-status err";
-      }
+      const unlocked = data.admin_ok;
+      adminPassword = unlocked ? adminPass.value : null;
+      modelSelect.disabled = !unlocked;
+      maxTokensInput.disabled = !unlocked;
+      maxTokensApply.disabled = !unlocked;
+      adminStatus.textContent = unlocked
+        ? "unlocked — you can switch the model & token cap"
+        : "wrong password";
+      adminStatus.className = "admin-status " + (unlocked ? "ok" : "err");
       return;
     }
     if (data.model_switched) {
@@ -249,7 +275,12 @@ function connect() {
     // Drop out-of-order/stale responses.
     if (typeof data.seq === "number" && data.seq < lastRenderedSeq) return;
     lastRenderedSeq = data.seq ?? lastRenderedSeq;
-    setStatus(`model: ${data.model}`, "ok");
+    let tok = "";
+    if (typeof data.n_tokens === "number" && data.max_tokens) {
+      const truncated = data.n_tokens_total > data.max_tokens;
+      tok = ` · ${data.n_tokens}/${data.max_tokens} tok${truncated ? " (truncated)" : ""}`;
+    }
+    setStatus(`model: ${data.model}${tok}`, data.n_tokens_total > data.max_tokens ? "" : "ok");
     renderResult(data);
   };
 }
@@ -265,6 +296,18 @@ function tryUnlock() {
 adminUnlock.addEventListener("click", tryUnlock);
 adminPass.addEventListener("keydown", (e) => {
   if (e.key === "Enter") tryUnlock();
+});
+
+// Admin: apply a new per-request token cap (affects everyone).
+function applyMaxTokens() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  const n = parseInt(maxTokensInput.value, 10);
+  if (!n) return;
+  socket.send(JSON.stringify({ set_max_tokens: n, password: adminPassword }));
+}
+maxTokensApply.addEventListener("click", applyMaxTokens);
+maxTokensInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") applyMaxTokens();
 });
 
 input.addEventListener("input", onInput);
@@ -324,6 +367,35 @@ function connectGpu() {
   };
   gs.onerror = () => (gpustatus.textContent = "gpu stream error");
 }
+
+// --- "are we running the latest code?" indicator -----------------------
+// Green = page + server match disk. Yellow = something changed: a static change
+// needs only a page reload; a backend (.py) change needs a server restart.
+const reloadBtn = document.getElementById("reloadbtn");
+let loadedStatic = null; // disk_static at the moment this page loaded
+
+function setReload(state, label) {
+  reloadBtn.className = "reload " + state; // ok | stale
+  reloadBtn.textContent = (state === "ok" ? "● " : "● ") + label;
+}
+
+async function checkVersion() {
+  try {
+    const v = await (await fetch("/api/version", { cache: "no-store" })).json();
+    if (loadedStatic === null) loadedStatic = v.disk_static;
+    const serverStale = v.disk_py !== v.running_py;       // backend changed → restart
+    const uiStale = v.disk_static !== loadedStatic;       // static changed → reload
+    if (serverStale) setReload("stale", "server changed — restart needed");
+    else if (uiStale) setReload("stale", "new UI — click to reload");
+    else setReload("ok", "up to date");
+  } catch {
+    setReload("stale", "offline");
+  }
+}
+
+reloadBtn.addEventListener("click", () => location.reload());
+checkVersion();
+setInterval(checkVersion, 4000);
 
 renderTyping(input.value);
 connect();

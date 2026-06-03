@@ -16,6 +16,7 @@ Set MODEL_NAME=mock to run without torch/transformers.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 
@@ -77,6 +78,18 @@ def resolve_quant(name: str) -> str | None:
 # Dynamic-batching knobs (overridable via env).
 MAX_BATCH = int(os.environ.get("MAX_BATCH", "8"))
 BATCH_WINDOW = float(os.environ.get("BATCH_WINDOW_MS", "8")) / 1000.0
+
+# Cap on tokens scored per request, to bound VRAM (logits are B×S×vocab). Text
+# beyond it is truncated; the client shows current/max in the status. Adjustable
+# at runtime from the admin panel (clamped to MAX_TOKENS_RANGE).
+MAX_TOKENS_DEFAULT = int(os.environ.get("MAX_TOKENS", "8192"))
+MAX_TOKENS_RANGE = (16, 32768)
+
+
+class Runtime:
+    """Mutable, admin-adjustable runtime settings (shared by all users)."""
+
+    max_tokens = MAX_TOKENS_DEFAULT
 
 # File the live in-page log terminal tails. run.sh tees the server's stdout+
 # stderr here (so it captures model-download/load progress too).
@@ -152,7 +165,7 @@ class BatchEngine:
             try:
                 async with self.manager.lock:
                     predictor = await self.manager._ensure_locked()
-                    results = await asyncio.to_thread(predictor.predict_batch, reqs)
+                    results = await asyncio.to_thread(predictor.predict_batch, reqs, Runtime.max_tokens)
                 for (_t, _k, fut), res in zip(batch, results):
                     if not fut.done():
                         fut.set_result(res)
@@ -176,9 +189,134 @@ async def broadcast(msg: dict) -> None:
             clients.discard(ws)
 
 
+# --- live "conversations": one streaming file per active user, viewable on a
+#     separate page (/viewer.html) over the /sessions WebSocket. -----------
+SESSIONS_DIR = os.environ.get("SESSIONS_DIR", os.path.join(os.path.dirname(__file__), "sessions"))
+sessions: dict[str, dict] = {}        # id -> {"text", "ip", "file", "path"}
+viewers: set[WebSocket] = set()       # /sessions viewer sockets
+_session_seq = 0
+
+
+async def _viewer_broadcast(event: dict) -> None:
+    payload = json.dumps(event)
+    for v in list(viewers):
+        try:
+            await v.send_text(payload)
+        except Exception:
+            viewers.discard(v)
+
+
+def _session_open(ip: str) -> str:
+    global _session_seq
+    _session_seq += 1
+    sid = f"u{_session_seq}"
+    try:
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
+        path = os.path.join(SESSIONS_DIR, f"{sid}.txt")
+        f = open(path, "w", encoding="utf-8")
+    except Exception:
+        f, path = None, None
+    sessions[sid] = {"text": "", "ip": ip, "file": f, "path": path}
+    return sid
+
+
+def _session_write(sid: str, text: str) -> None:
+    s = sessions.get(sid)
+    if s is None:
+        return
+    s["text"] = text
+    f = s.get("file")
+    if f is not None:
+        try:
+            f.seek(0)
+            f.truncate()
+            f.write(text)
+            f.flush()
+        except Exception:
+            pass
+
+
+def _session_close(sid: str) -> None:
+    s = sessions.pop(sid, None)
+    if s is None:
+        return
+    f = s.get("file")
+    if f is not None:
+        try:
+            f.close()
+        except Exception:
+            pass
+    if s.get("path"):
+        try:
+            os.remove(s["path"])
+        except OSError:
+            pass
+
+
 @app.get("/api/config")
 def config():
-    return {"models": MODELS, "default": DEFAULT_MODEL, "current": manager.desired_name}
+    return {
+        "models": MODELS,
+        "default": DEFAULT_MODEL,
+        "current": manager.desired_name,
+        "max_tokens": Runtime.max_tokens,
+    }
+
+
+# Version stamps so the page can show whether it's running the latest code.
+# Backend files need a server restart; static files only need a page reload.
+_HERE = os.path.dirname(__file__)
+_PY_FILES = ["server.py", "predictors.py"]
+_STATIC_FILES = ["static/index.html", "static/app.js", "static/style.css", "static/viewer.html"]
+
+
+def _hash_files(rel_files) -> str:
+    h = hashlib.sha1()
+    for rel in rel_files:
+        try:
+            with open(os.path.join(_HERE, rel), "rb") as f:
+                h.update(f.read())
+        except OSError:
+            h.update(b"<missing>")
+        h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
+# Captured once at startup = the code this process is actually running.
+RUNNING_PY = _hash_files(_PY_FILES)
+RUNNING_STATIC = _hash_files(_STATIC_FILES)
+
+
+@app.get("/api/version")
+def version():
+    """running_* = what this process started with; disk_* = what's on disk now.
+    If disk_py != running_py a server RESTART is needed; if disk_static differs
+    from what the page loaded, a browser RELOAD picks it up."""
+    return {
+        "running_py": RUNNING_PY,
+        "running_static": RUNNING_STATIC,
+        "disk_py": _hash_files(_PY_FILES),
+        "disk_static": _hash_files(_STATIC_FILES),
+    }
+
+
+@app.websocket("/sessions")
+async def sessions_ws(socket: WebSocket):
+    """Viewer feed: snapshot of every active user's current text, then live
+    open/update/close events as people type and come/go."""
+    await socket.accept()
+    viewers.add(socket)
+    await socket.send_text(json.dumps({
+        "type": "snapshot",
+        "sessions": [{"id": sid, "ip": s["ip"], "text": s["text"]} for sid, s in sessions.items()],
+    }))
+    try:
+        while True:
+            await socket.receive_text()  # viewers don't send; this just detects close
+    except (WebSocketDisconnect, RuntimeError):
+        return
+    finally:
+        viewers.discard(socket)
 
 
 @app.websocket("/ws")
@@ -186,8 +324,14 @@ async def ws(socket: WebSocket):
     await socket.accept()
     engine.start()  # idempotent; ensures the worker runs on the live event loop
     clients.add(socket)
+    ip = socket.client.host if socket.client else "?"
+    sid = _session_open(ip)  # one streaming file per active user
+    await _viewer_broadcast({"type": "open", "id": sid, "ip": ip})
     await socket.send_text(
-        json.dumps({"models": MODELS, "default": DEFAULT_MODEL, "current": manager.desired_name})
+        json.dumps({
+            "models": MODELS, "default": DEFAULT_MODEL,
+            "current": manager.desired_name, "max_tokens": Runtime.max_tokens,
+        })
     )
 
     try:
@@ -203,6 +347,23 @@ async def ws(socket: WebSocket):
                 await socket.send_text(
                     json.dumps({"admin_ok": msg.get("admin_check") == ADMIN_PASSWORD})
                 )
+                continue
+
+            # --- admin: adjust the per-request token cap (affects EVERYONE) ---
+            if "set_max_tokens" in msg:
+                if msg.get("password") != ADMIN_PASSWORD:
+                    await socket.send_text(
+                        json.dumps({"error": "Wrong admin password — unlock the admin panel to change the token cap."})
+                    )
+                    continue
+                try:
+                    n = int(msg.get("set_max_tokens"))
+                except (TypeError, ValueError):
+                    await socket.send_text(json.dumps({"error": "max tokens must be a number"}))
+                    continue
+                lo, hi = MAX_TOKENS_RANGE
+                Runtime.max_tokens = max(lo, min(hi, n))
+                await broadcast({"max_tokens_changed": Runtime.max_tokens})
                 continue
 
             # --- explicit global model switch: admin-only, changes EVERYONE ---
@@ -232,6 +393,10 @@ async def ws(socket: WebSocket):
             k = int(msg.get("k", 10))
             seq = msg.get("seq")  # echoed back so the client can drop stale results
 
+            # Stream this user's current text to their session file + viewers.
+            _session_write(sid, text)
+            await _viewer_broadcast({"type": "update", "id": sid, "text": text})
+
             # If the model isn't resident yet, tell this client before it blocks.
             if manager.predictor is None or manager.current_name != manager.desired_name:
                 await socket.send_text(
@@ -252,6 +417,8 @@ async def ws(socket: WebSocket):
         return
     finally:
         clients.discard(socket)
+        _session_close(sid)  # close + remove this user's streaming file
+        await _viewer_broadcast({"type": "close", "id": sid})
 
 
 def _gpu_frame() -> str:

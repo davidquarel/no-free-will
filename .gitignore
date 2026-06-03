@@ -11,3 +11,5 @@ venv/
 # cloudflared tunnel binary + its artifacts
 cloudflared
 TUNNEL_URL.txt
+# per-user live conversation files
+sessions/

@@ -26,7 +26,36 @@ header {
   max-width: 1100px;
   margin: 0 auto;
   padding: 32px 24px 8px;
+  position: relative;
 }
+
+/* "running the latest code?" pill, top-right of the header */
+.reload {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: var(--muted);
+  cursor: pointer;
+}
+.reload.ok { color: #56d364; border-color: rgba(86, 211, 100, 0.4); }
+.reload.stale { color: #e3b341; border-color: rgba(227, 179, 65, 0.5); background: rgba(187, 128, 9, 0.12); }
+.reload:hover { filter: brightness(1.15); }
+
+.viewer-link { margin: 4px 0 0; font-size: 13px; }
+.viewer-link a { color: var(--accent); text-decoration: none; }
+.viewer-link a:hover { text-decoration: underline; }
+
+.admin-field { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.admin-field input { width: 96px; background: #0d1117; color: var(--fg); border: 1px solid #30363d; border-radius: 6px; padding: 5px 7px; font-size: 13px; }
+#maxtokensapply { background: #21262d; color: var(--fg); border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+#maxtokensapply:hover { background: #30363d; }
+#maxtokensapply[disabled], .admin-field input[disabled] { opacity: 0.5; cursor: not-allowed; }
 
 h1 {
   margin: 0;

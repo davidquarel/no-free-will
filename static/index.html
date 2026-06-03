@@ -8,6 +8,7 @@
 </head>
 <body>
   <header>
+    <button id="reloadbtn" class="reload" type="button" title="reload to apply updates">● checking…</button>
     <h1>no free will</h1>
     <p class="tagline">
       Start typing. A language model is racing to guess your next token before
@@ -15,6 +16,7 @@
       <span class="legend green">bored</span> /
       <span class="legend red">surprised</span> it.
     </p>
+    <p class="viewer-link"><a href="viewer.html">🔴 live feed — watch everyone typing →</a></p>
   </header>
 
   <main>
@@ -44,12 +46,17 @@
             ⚠ Switching changes the model for <strong>all connected users</strong>
             (one model in VRAM, shared + batched).
           </p>
+          <label class="admin-field">
+            <span>max tokens / request</span>
+            <input type="number" id="maxtokens" min="16" max="32768" step="16" disabled />
+          </label>
+          <button type="button" id="maxtokensapply" disabled>apply token cap</button>
         </div>
       </details>
 
       <div class="stat">
         <div class="stat-big"><span id="accuracy">—</span></div>
-        <div class="stat-label">of your tokens were the model's #1 guess</div>
+        <div class="stat-label">of your words the model nailed (every token its #1 guess)</div>
       </div>
 
       <div class="status" id="status">connecting…</div>

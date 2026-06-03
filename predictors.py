@@ -37,11 +37,20 @@ class BasePredictor:
     def predict(self, text: str, k: int = 10) -> dict[str, Any]:
         raise NotImplementedError
 
-    def predict_batch(self, reqs: list[tuple[str, int]]) -> list[dict[str, Any]]:
+    def predict_batch(
+        self, reqs: list[tuple[str, int]], max_tokens: int | None = None
+    ) -> list[dict[str, Any]]:
         """Predict several (text, k) requests at once. Default: just loop. The
         HF predictor overrides this with a single padded forward pass so that
         concurrent users share one GPU call."""
-        return [self.predict(text, k) for text, k in reqs]
+        out = []
+        for text, k in reqs:
+            r = self.predict(text, k)
+            r.setdefault("n_tokens", len(r.get("tokens", [])))
+            r.setdefault("n_tokens_total", r["n_tokens"])
+            r["max_tokens"] = max_tokens
+            out.append(r)
+        return out
 
 
 class HFPredictor(BasePredictor):
@@ -143,7 +152,9 @@ class HFPredictor(BasePredictor):
     def predict(self, text: str, k: int = 10) -> dict[str, Any]:
         return self.predict_batch([(text, k)])[0]
 
-    def predict_batch(self, reqs: list[tuple[str, int]]) -> list[dict[str, Any]]:
+    def predict_batch(
+        self, reqs: list[tuple[str, int]], max_tokens: int | None = None
+    ) -> list[dict[str, Any]]:
         """Run several requests through a single padded forward pass.
 
         Sequences are LEFT-padded so every row's final real token lands at
@@ -154,17 +165,23 @@ class HFPredictor(BasePredictor):
         each row's left-pad width."""
         torch = self.torch
         with self._lock, torch.no_grad():
-            # Encode every request and prepend the one start token.
-            seqs = []  # (full_input_ids, content_ids)
+            # Encode every request, cap to max_tokens (drop the rest), and
+            # prepend the one start token.
+            seqs = []  # (full_input_ids, content_ids, total_tokens_before_cap)
             for text, _k in reqs:
+                if max_tokens is not None:
+                    text = text[: max_tokens * 16]  # bound tokenizer work on huge pastes
                 ids = self.tokenizer.encode(text, add_special_tokens=False)
+                total = len(ids)
+                if max_tokens is not None and total > max_tokens:
+                    ids = ids[:max_tokens]  # keep the first max_tokens, truncate after
                 full = ([self.prefix_id] if self.prefix_id is not None else []) + ids
                 if not full:  # need >=1 token to get a next-token distribution
                     full = [self.prefix_id if self.prefix_id is not None else 0]
-                seqs.append((full, ids))
+                seqs.append((full, ids, total))
 
             B = len(seqs)
-            S = max(len(full) for full, _ in seqs)
+            S = max(len(full) for full, _ids, _total in seqs)
             pad_id = self.tokenizer.pad_token_id
             if pad_id is None:
                 pad_id = self.tokenizer.eos_token_id
@@ -173,7 +190,7 @@ class HFPredictor(BasePredictor):
 
             input_ids = torch.full((B, S), pad_id, dtype=torch.long)
             attn = torch.zeros((B, S), dtype=torch.long)
-            for b, (full, _ids) in enumerate(seqs):
+            for b, (full, _ids, _total) in enumerate(seqs):
                 L = len(full)
                 input_ids[b, S - L:] = torch.tensor(full, dtype=torch.long)  # left pad
                 attn[b, S - L:] = 1
@@ -192,7 +209,7 @@ class HFPredictor(BasePredictor):
 
             offset = 1 if self.prefix_id is not None else 0
             out = []
-            for b, (full, ids) in enumerate(seqs):
+            for b, (full, ids, total) in enumerate(seqs):
                 k = reqs[b][1]
                 pad_b = S - len(full)
 
@@ -222,7 +239,14 @@ class HFPredictor(BasePredictor):
                         {"text": self._decode(tid), "prob": float(math.exp(lp)), "rank": rank}
                     )
 
-                out.append({"model": self.name, "predictions": predictions, "tokens": tokens})
+                out.append({
+                    "model": self.name,
+                    "predictions": predictions,
+                    "tokens": tokens,
+                    "n_tokens": len(ids),        # tokens actually scored (after cap)
+                    "n_tokens_total": total,     # tokens the user actually typed
+                    "max_tokens": max_tokens,
+                })
             return out
 
 
