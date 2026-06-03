@@ -249,6 +249,17 @@ function connect() {
       setStatus(`token cap: ${data.max_tokens_changed}`, "ok");
       return;
     }
+    if (data.cleared) {
+      // An admin cleared all conversations — wipe this editor too.
+      input.value = "";
+      lastTokens = [];
+      renderTyping("");
+      predictionsEl.innerHTML = "";
+      accuracyEl.textContent = "—";
+      ghost.textContent = "";
+      setStatus("conversations cleared", "ok");
+      return;
+    }
     if (typeof data.admin_ok === "boolean") {
       const unlocked = data.admin_ok;
       adminPassword = unlocked ? adminPass.value : null;

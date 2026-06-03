@@ -206,7 +206,7 @@ async def _viewer_broadcast(event: dict) -> None:
             viewers.discard(v)
 
 
-def _session_open(ip: str) -> str:
+def _session_open(ip: str, socket: WebSocket) -> str:
     global _session_seq
     _session_seq += 1
     sid = f"u{_session_seq}"
@@ -216,8 +216,24 @@ def _session_open(ip: str) -> str:
         f = open(path, "w", encoding="utf-8")
     except Exception:
         f, path = None, None
-    sessions[sid] = {"text": "", "ip": ip, "file": f, "path": path}
+    sessions[sid] = {"text": "", "ip": ip, "file": f, "path": path, "socket": socket}
     return sid
+
+
+async def _clear_session(sid: str) -> None:
+    """Admin delete of one live conversation: wipe its text/file/viewer panel and
+    tell that user's editor to clear too (otherwise it repopulates on keystroke)."""
+    s = sessions.get(sid)
+    if s is None:
+        return
+    _session_write(sid, "")
+    await _viewer_broadcast({"type": "update", "id": sid, "text": ""})
+    sock = s.get("socket")
+    if sock is not None:
+        try:
+            await sock.send_text(json.dumps({"cleared": True}))
+        except Exception:
+            pass
 
 
 def _session_write(sid: str, text: str) -> None:
@@ -312,7 +328,20 @@ async def sessions_ws(socket: WebSocket):
     }))
     try:
         while True:
-            await socket.receive_text()  # viewers don't send; this just detects close
+            raw = await socket.receive_text()
+            try:
+                m = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            # Verify the admin password so the viewer page can unlock delete.
+            if "admin_check" in m:
+                await socket.send_text(json.dumps({"admin_ok": m.get("admin_check") == ADMIN_PASSWORD}))
+            # Admin: delete (clear) one conversation.
+            elif m.get("action") == "delete":
+                if m.get("password") != ADMIN_PASSWORD:
+                    await socket.send_text(json.dumps({"error": "wrong admin password"}))
+                else:
+                    await _clear_session(m.get("id"))
     except (WebSocketDisconnect, RuntimeError):
         return
     finally:
@@ -325,7 +354,7 @@ async def ws(socket: WebSocket):
     engine.start()  # idempotent; ensures the worker runs on the live event loop
     clients.add(socket)
     ip = socket.client.host if socket.client else "?"
-    sid = _session_open(ip)  # one streaming file per active user
+    sid = _session_open(ip, socket)  # one streaming file per active user
     await _viewer_broadcast({"type": "open", "id": sid, "ip": ip})
     await socket.send_text(
         json.dumps({

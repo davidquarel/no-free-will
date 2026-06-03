@@ -22,10 +22,21 @@
     }
     .conv { background: var(--panel); border: 1px solid #30363d; border-radius: 10px; overflow: hidden; }
     .conv-head {
-      display: flex; justify-content: space-between; gap: 8px;
+      display: flex; justify-content: space-between; gap: 8px; align-items: center;
       padding: 8px 12px; border-bottom: 1px solid #30363d;
       font-family: var(--mono); font-size: 12px; color: var(--muted);
     }
+    .hdr-right { display: flex; gap: 8px; align-items: center; }
+    .del { background: none; border: 0; color: #f85149; cursor: pointer;
+      font-size: 14px; line-height: 1; padding: 0 2px; display: none; }
+    .del.show { display: inline; }
+    .admin { margin-top: 12px; display: flex; gap: 6px; align-items: center; font-size: 13px; }
+    .admin input { background: #0d1117; color: var(--fg); border: 1px solid #30363d; border-radius: 6px; padding: 5px 8px; }
+    .admin button { background: #21262d; color: var(--fg); border: 1px solid #30363d; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+    .admin button:hover { background: #30363d; }
+    #astatus { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+    #astatus.ok { color: #56d364; }
+    #astatus.err { color: #f85149; }
     .conv-body {
       margin: 0; padding: 12px; min-height: 90px; max-height: 320px; overflow-y: auto;
       font-family: var(--mono); font-size: 13px; line-height: 1.5;
@@ -39,6 +50,11 @@
   <header>
     <h1>live conversations <span class="dot">●</span></h1>
     <div class="sub">Everyone currently typing into the app, streamed live. <span id="count">0</span> active.</div>
+    <div class="admin">
+      <input type="password" id="pw" placeholder="admin password" autocomplete="off" />
+      <button id="unlock" type="button">unlock</button>
+      <span id="astatus">locked — unlock to delete conversations</span>
+    </div>
   </header>
   <main id="grid"><div class="none" id="none">No one is connected right now.</div></main>
 
@@ -46,7 +62,13 @@
     const grid = document.getElementById("grid");
     const countEl = document.getElementById("count");
     const noneEl = document.getElementById("none");
+    const pwEl = document.getElementById("pw");
+    const unlockEl = document.getElementById("unlock");
+    const aStatus = document.getElementById("astatus");
     const panels = {};
+    let sock = null;
+    let adminPw = null;     // verified admin password
+    let unlocked = false;
 
     function refresh() {
       const n = Object.keys(panels).length;
@@ -61,13 +83,25 @@
       const el = document.createElement("section");
       el.className = "conv";
       el.innerHTML =
-        `<div class="conv-head"><span>${id}</span><span>${ip || ""}</span></div>` +
-        `<pre class="conv-body"></pre>`;
+        `<div class="conv-head"><span>${id}</span>` +
+        `<span class="hdr-right"><span>${ip || ""}</span>` +
+        `<button class="del${unlocked ? " show" : ""}" title="delete this conversation">✕</button>` +
+        `</span></div><pre class="conv-body"></pre>`;
       grid.appendChild(el);
+      el.querySelector(".del").addEventListener("click", () => {
+        if (sock && sock.readyState === 1) {
+          sock.send(JSON.stringify({ action: "delete", id, password: adminPw }));
+        }
+      });
       panels[id] = { el, body: el.querySelector(".conv-body") };
       refresh();
       return panels[id];
     }
+
+    unlockEl.addEventListener("click", () => {
+      if (sock && sock.readyState === 1) sock.send(JSON.stringify({ admin_check: pwEl.value }));
+    });
+    pwEl.addEventListener("keydown", (e) => { if (e.key === "Enter") unlockEl.click(); });
     function setText(id, text) {
       const p = panels[id];
       if (!p) return;
@@ -78,9 +112,18 @@
 
     function connect() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${proto}://${location.host}/sessions`);
-      ws.onmessage = (ev) => {
+      sock = new WebSocket(`${proto}://${location.host}/sessions`);
+      sock.onmessage = (ev) => {
         const d = JSON.parse(ev.data);
+        if (typeof d.admin_ok === "boolean") {
+          unlocked = d.admin_ok;
+          adminPw = unlocked ? pwEl.value : null;
+          document.querySelectorAll(".del").forEach((b) => b.classList.toggle("show", unlocked));
+          aStatus.textContent = unlocked ? "unlocked — click ✕ to delete a conversation" : "wrong password";
+          aStatus.className = unlocked ? "ok" : "err";
+          return;
+        }
+        if (d.error) { aStatus.textContent = d.error; aStatus.className = "err"; return; }
         if (d.type === "snapshot") {
           for (const id of Object.keys(panels)) { panels[id].el.remove(); delete panels[id]; }
           for (const s of d.sessions) { panelFor(s.id, s.ip); setText(s.id, s.text); }
@@ -94,7 +137,7 @@
           if (p) { p.el.remove(); delete panels[d.id]; refresh(); }
         }
       };
-      ws.onclose = () => setTimeout(connect, 1500);
+      sock.onclose = () => setTimeout(connect, 1500);
     }
     connect();
   </script>
