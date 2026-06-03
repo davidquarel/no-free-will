@@ -15,3 +15,5 @@ TUNNEL_URL.txt
 sessions/
 # admin ban list
 banned_clients.txt
+# generated admin password (when ADMIN_PASSWORD env is unset)
+admin_password.txt

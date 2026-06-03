@@ -3,7 +3,8 @@
 # Serve the app. Run setup.sh once first to install dependencies.
 # Defaults to Qwen2.5-7B in FULL bf16 (~14GB) — strong and unquantized. Bigger
 # models (8B 8-bit, 14B 4-bit) auto-quantize since that's the only way they fit
-# 16GB; switch models from the in-page admin panel (password "banana").
+# 16GB; switch models from the in-page admin panel (admin password comes from
+# the ADMIN_PASSWORD env var — see below).
 #
 #   bash run.sh                 # serve on port 8080
 #   bash run.sh --port 9000     # serve on a different port
@@ -12,6 +13,8 @@
 #   MODEL_NAME=Qwen/Qwen3-8B-Base bash run.sh   # start on a bigger model
 #   QUANTIZE=4bit bash run.sh                    # force 4-bit for EVERY model
 #   TUNNEL=1 bash run.sh                         # also open a public cloudflared URL
+#   ADMIN_PASSWORD='secret' bash run.sh          # admin password (else one is
+#                                                # generated into admin_password.txt)
 #
 set -euo pipefail
 cd "$(dirname "$0")"

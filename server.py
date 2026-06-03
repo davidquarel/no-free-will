@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import os
+import secrets
 import urllib.request
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -56,10 +57,20 @@ MODELS = [
 
 DEFAULT_MODEL = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B")
 
-# Light gate on model switching (changing the model affects everyone). Not meant
-# to be strong — just enough to stop casual visitors flipping the model. Set a
-# real one via ADMIN_PASSWORD; defaults to "banana".
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "banana")
+# Admin password — taken ONLY from the ADMIN_PASSWORD env var, so it's never
+# hardcoded in source. If it's unset, we generate a random one and write it to
+# admin_password.txt (gitignored). We deliberately do NOT print the value: the
+# server log is streamed publicly to the in-page terminal.
+#   Set your own:  ADMIN_PASSWORD='whatever' bash run.sh
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+if not ADMIN_PASSWORD:
+    ADMIN_PASSWORD = secrets.token_urlsafe(9)
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "admin_password.txt"), "w", encoding="utf-8") as _pf:
+            _pf.write(ADMIN_PASSWORD + "\n")
+    except OSError:
+        pass
+    print("[admin] ADMIN_PASSWORD not set — wrote a generated one to admin_password.txt", flush=True)
 
 # Make sure a custom MODEL_NAME is always selectable in the dropdown.
 if DEFAULT_MODEL not in {m["id"] for m in MODELS}:
@@ -195,6 +206,7 @@ async def broadcast(msg: dict) -> None:
 SESSIONS_DIR = os.environ.get("SESSIONS_DIR", os.path.join(os.path.dirname(__file__), "sessions"))
 sessions: dict[str, dict] = {}        # id -> {"text", "ip", "file", "path"}
 viewers: set[WebSocket] = set()       # /sessions viewer sockets
+admin_viewers: set[WebSocket] = set()  # viewers that unlocked (get the ban list)
 _session_seq = 0
 
 # Identifies this server process; sent in the hello so the client can tell when
@@ -220,15 +232,26 @@ def _load_bans() -> set[str]:
 BANNED_CIDS: set[str] = _load_bans()
 
 
+def _save_bans() -> None:
+    try:
+        with open(BANNED_FILE, "w", encoding="utf-8") as f:
+            for c in sorted(BANNED_CIDS):
+                f.write(c + "\n")
+    except OSError:
+        pass
+
+
 def _ban_cid(cid: str | None) -> None:
     if not cid or cid in BANNED_CIDS:
         return
     BANNED_CIDS.add(cid)
-    try:
-        with open(BANNED_FILE, "a", encoding="utf-8") as f:
-            f.write(cid + "\n")
-    except OSError:
-        pass
+    _save_bans()
+
+
+def _unban_cid(cid: str | None) -> None:
+    if cid and cid in BANNED_CIDS:
+        BANNED_CIDS.discard(cid)
+        _save_bans()
 
 
 def _reset_sessions_dir() -> None:
@@ -255,6 +278,16 @@ async def _viewer_broadcast(event: dict) -> None:
             await v.send_text(payload)
         except Exception:
             viewers.discard(v)
+
+
+async def _broadcast_bans() -> None:
+    """Push the ban list to unlocked admin viewers only (not regular viewers)."""
+    payload = json.dumps({"type": "bans", "bans": sorted(BANNED_CIDS)})
+    for v in list(admin_viewers):
+        try:
+            await v.send_text(payload)
+        except Exception:
+            admin_viewers.discard(v)
 
 
 # Coarse IP -> country flag, so the viewer shows "where", not a precise IP.
@@ -465,9 +498,15 @@ async def sessions_ws(socket: WebSocket):
                 m = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            # Verify the admin password so the viewer page can unlock delete.
+            # Verify the admin password so the viewer page can unlock delete/ban.
             if "admin_check" in m:
-                await socket.send_text(json.dumps({"admin_ok": m.get("admin_check") == ADMIN_PASSWORD}))
+                ok = m.get("admin_check") == ADMIN_PASSWORD
+                if ok:
+                    admin_viewers.add(socket)
+                    await socket.send_text(json.dumps({"admin_ok": True, "bans": sorted(BANNED_CIDS)}))
+                else:
+                    admin_viewers.discard(socket)
+                    await socket.send_text(json.dumps({"admin_ok": False}))
             # Admin: delete (clear) one conversation.
             elif m.get("action") == "delete":
                 if m.get("password") != ADMIN_PASSWORD:
@@ -489,10 +528,19 @@ async def sessions_ws(socket: WebSocket):
                                 await sock.close(code=1008)
                             except Exception:
                                 pass
+                        await _broadcast_bans()
+            # Admin: lift a ban.
+            elif m.get("action") == "unban":
+                if m.get("password") != ADMIN_PASSWORD:
+                    await socket.send_text(json.dumps({"error": "wrong admin password"}))
+                else:
+                    _unban_cid(m.get("cid"))
+                    await _broadcast_bans()
     except (WebSocketDisconnect, RuntimeError):
         return
     finally:
         viewers.discard(socket)
+        admin_viewers.discard(socket)
 
 
 @app.websocket("/ws")

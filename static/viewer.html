@@ -42,6 +42,15 @@
     #astatus { color: var(--muted); font-family: var(--mono); font-size: 12px; }
     #astatus.ok { color: #56d364; }
     #astatus.err { color: #f85149; }
+    .banlist { margin-top: 12px; }
+    .banlist-head { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-bottom: 4px; }
+    .banlist ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-width: 460px; }
+    .banlist li { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      background: var(--panel); border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; }
+    .banlist code { font-family: var(--mono); font-size: 12px; color: var(--fg); }
+    .unban { background: #21262d; color: var(--fg); border: 1px solid #30363d; border-radius: 5px;
+      padding: 3px 8px; cursor: pointer; font-size: 12px; }
+    .unban:hover { background: #30363d; }
     .conv-body {
       margin: 0; padding: 12px; min-height: 90px; max-height: 320px; overflow-y: auto;
       font-family: var(--mono); font-size: 13px; line-height: 1.5;
@@ -58,7 +67,11 @@
     <div class="admin">
       <input type="password" id="pw" placeholder="admin password" autocomplete="off" />
       <button id="unlock" type="button">unlock</button>
-      <span id="astatus">locked — unlock to delete conversations</span>
+      <span id="astatus">locked — unlock to delete / ban</span>
+    </div>
+    <div class="banlist" id="banlist" hidden>
+      <div class="banlist-head">banned browsers (<span id="bancount">0</span>)</div>
+      <ul id="bans"></ul>
     </div>
   </header>
   <main id="grid"><div class="none" id="none">No one is connected right now.</div></main>
@@ -70,6 +83,9 @@
     const pwEl = document.getElementById("pw");
     const unlockEl = document.getElementById("unlock");
     const aStatus = document.getElementById("astatus");
+    const banlistEl = document.getElementById("banlist");
+    const bansUl = document.getElementById("bans");
+    const banCount = document.getElementById("bancount");
     const panels = {};
     let sock = null;
     let adminPw = null;     // verified admin password
@@ -131,6 +147,27 @@
       }
     }
 
+    function renderBans(list) {
+      banCount.textContent = list.length;
+      bansUl.innerHTML = "";
+      for (const cid of list) {
+        const li = document.createElement("li");
+        const code = document.createElement("code");
+        code.textContent = cid.length > 16 ? cid.slice(0, 16) + "…" : cid;
+        code.title = cid;
+        const btn = document.createElement("button");
+        btn.className = "unban";
+        btn.textContent = "unban";
+        btn.addEventListener("click", () => {
+          if (sock && sock.readyState === 1) {
+            sock.send(JSON.stringify({ action: "unban", cid, password: adminPw }));
+          }
+        });
+        li.append(code, btn);
+        bansUl.appendChild(li);
+      }
+    }
+
     unlockEl.addEventListener("click", () => {
       if (sock && sock.readyState === 1) sock.send(JSON.stringify({ admin_check: pwEl.value }));
     });
@@ -152,10 +189,13 @@
           unlocked = d.admin_ok;
           adminPw = unlocked ? pwEl.value : null;
           document.querySelectorAll(".del, .ban").forEach((b) => b.classList.toggle("show", unlocked));
-          aStatus.textContent = unlocked ? "unlocked — click ✕ to delete a conversation" : "wrong password";
+          banlistEl.hidden = !unlocked;          // ban list only appears when unlocked
+          if (unlocked) renderBans(d.bans || []);
+          aStatus.textContent = unlocked ? "unlocked — ✕ delete · ban · manage bans below" : "wrong password";
           aStatus.className = unlocked ? "ok" : "err";
           return;
         }
+        if (d.type === "bans") { renderBans(d.bans || []); return; }
         if (d.error) { aStatus.textContent = d.error; aStatus.className = "err"; return; }
         if (d.type === "snapshot") {
           for (const id of Object.keys(panels)) { panels[id].el.remove(); delete panels[id]; }
