@@ -44,19 +44,60 @@ if [ ! -d .venv ]; then
   exit 1
 fi
 
-# Optional public URL via cloudflared.
-if [ "${TUNNEL:-0}" = "1" ]; then
-  if [ ! -x ./cloudflared ]; then
-    echo ">> fetching cloudflared…"
-    curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-    chmod +x cloudflared
-  fi
-  echo ">> opening public tunnel (URL will print below)…"
-  ./cloudflared tunnel --url "http://localhost:${PORT}" &
+SERVE=(env MODEL_NAME="$MODEL_NAME" QUANTIZE="$QUANTIZE"
+       uv run uvicorn server:app --host "$HOST" --port "$PORT")
+
+echo ">> serving ${MODEL_NAME} (QUANTIZE='${QUANTIZE}') on ${HOST}:${PORT}"
+
+# Without a tunnel, just serve in the foreground.
+if [ "${TUNNEL:-0}" != "1" ]; then
+  echo ">> open http://localhost:${PORT}  (or use an SSH tunnel / TUNNEL=1 for a public URL)"
+  exec "${SERVE[@]}"
 fi
 
-# Serve. First run downloads the model weights from HuggingFace.
-echo ">> serving ${MODEL_NAME} (QUANTIZE='${QUANTIZE}') on ${HOST}:${PORT}"
-echo ">> open http://localhost:${PORT}  (or use an SSH tunnel / TUNNEL=1 for a public URL)"
-exec env MODEL_NAME="$MODEL_NAME" QUANTIZE="$QUANTIZE" \
-  uv run uvicorn server:app --host "$HOST" --port "$PORT"
+# --- TUNNEL path: start the server, wait until it answers, THEN open the
+#     tunnel so the public URL never points at a not-yet-listening port. ---
+"${SERVE[@]}" &
+SERVER_PID=$!
+cleanup() { kill "$SERVER_PID" 2>/dev/null || true; kill "${CF_PID:-}" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+echo ">> waiting for the server to come up on port ${PORT}…"
+for _ in $(seq 1 60); do
+  if curl -sf "http://localhost:${PORT}/api/config" >/dev/null 2>&1; then break; fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "!! server exited before it started listening — check the logs above" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+if [ ! -x ./cloudflared ]; then
+  echo ">> fetching cloudflared…"
+  curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+  chmod +x cloudflared
+fi
+
+echo ">> opening public tunnel…"
+./cloudflared tunnel --url "http://localhost:${PORT}" > cloudflared.log 2>&1 &
+CF_PID=$!
+
+URL=""
+for _ in $(seq 1 30); do
+  URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log | head -1 || true)
+  [ -n "$URL" ] && break
+  sleep 1
+done
+
+echo
+echo "============================================================"
+if [ -n "$URL" ]; then
+  echo "  PUBLIC URL:  $URL"
+else
+  echo "  Tunnel URL not detected yet — check cloudflared.log"
+fi
+echo "  (the model downloads on first use; first prediction lags)"
+echo "============================================================"
+echo
+
+wait "$SERVER_PID"
