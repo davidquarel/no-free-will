@@ -32,6 +32,9 @@
     .del { background: none; border: 0; color: #f85149; cursor: pointer;
       font-size: 14px; line-height: 1; padding: 0 2px; display: none; }
     .del.show { display: inline; }
+    .ban { background: none; border: 1px solid rgba(227,179,65,0.4); color: #e3b341; cursor: pointer;
+      font-size: 11px; line-height: 1; padding: 2px 6px; border-radius: 5px; display: none; }
+    .ban.show { display: inline; }
     .admin { margin-top: 12px; display: flex; gap: 6px; align-items: center; font-size: 13px; }
     .admin input { background: #0d1117; color: var(--fg); border: 1px solid #30363d; border-radius: 6px; padding: 5px 8px; }
     .admin button { background: #21262d; color: var(--fg); border: 1px solid #30363d; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
@@ -88,12 +91,19 @@
         `<div class="conv-head">` +
         `<span>${id} <span class="score" title="words fully predicted">—</span></span>` +
         `<span class="hdr-right"><span class="flag" title="approx. location">${flag || "🌐"}</span>` +
+        `<button class="ban${unlocked ? " show" : ""}" title="ban this browser from reconnecting">ban</button>` +
         `<button class="del${unlocked ? " show" : ""}" title="delete this conversation">✕</button>` +
         `</span></div><pre class="conv-body"></pre>`;
       grid.appendChild(el);
       el.querySelector(".del").addEventListener("click", () => {
         if (sock && sock.readyState === 1) {
           sock.send(JSON.stringify({ action: "delete", id, password: adminPw }));
+        }
+      });
+      el.querySelector(".ban").addEventListener("click", () => {
+        if (sock && sock.readyState === 1 &&
+            confirm(`Ban ${id}? Their browser won't be able to reconnect (clearing storage/incognito gets around it).`)) {
+          sock.send(JSON.stringify({ action: "ban", id, password: adminPw }));
         }
       });
       panels[id] = {
@@ -141,7 +151,7 @@
         if (typeof d.admin_ok === "boolean") {
           unlocked = d.admin_ok;
           adminPw = unlocked ? pwEl.value : null;
-          document.querySelectorAll(".del").forEach((b) => b.classList.toggle("show", unlocked));
+          document.querySelectorAll(".del, .ban").forEach((b) => b.classList.toggle("show", unlocked));
           aStatus.textContent = unlocked ? "unlocked — click ✕ to delete a conversation" : "wrong password";
           aStatus.className = unlocked ? "ok" : "err";
           return;

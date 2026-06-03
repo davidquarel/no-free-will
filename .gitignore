@@ -13,3 +13,5 @@ cloudflared
 TUNNEL_URL.txt
 # per-user live conversation files
 sessions/
+# admin ban list
+banned_clients.txt

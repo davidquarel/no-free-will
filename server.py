@@ -201,6 +201,35 @@ _session_seq = 0
 # the server has restarted (and clear its editor instead of resurrecting text).
 SERVER_ID = os.getpid()
 
+# Bans (admin, from the viewer page). We ban a per-browser client token rather
+# than an IP: it targets the individual browser instead of everyone sharing the
+# IP (NAT/household), and is intentionally evadable (clear storage/incognito) —
+# annoying, not nuclear. Persisted so bans survive restarts. (A web server can't
+# see a client's MAC address — that never leaves the local network.)
+BANNED_FILE = os.environ.get("BANNED_FILE", os.path.join(os.path.dirname(__file__), "banned_clients.txt"))
+
+
+def _load_bans() -> set[str]:
+    try:
+        with open(BANNED_FILE, encoding="utf-8") as f:
+            return {ln.strip() for ln in f if ln.strip()}
+    except OSError:
+        return set()
+
+
+BANNED_CIDS: set[str] = _load_bans()
+
+
+def _ban_cid(cid: str | None) -> None:
+    if not cid or cid in BANNED_CIDS:
+        return
+    BANNED_CIDS.add(cid)
+    try:
+        with open(BANNED_FILE, "a", encoding="utf-8") as f:
+            f.write(cid + "\n")
+    except OSError:
+        pass
+
 
 def _reset_sessions_dir() -> None:
     """Wipe leftover conversation files from a previous run on startup, so old
@@ -276,7 +305,7 @@ async def _geolocate_session(sid: str, ip: str) -> None:
     await _viewer_broadcast({"type": "flag", "id": sid, "flag": s["flag"]})
 
 
-def _session_open(ip: str, socket: WebSocket) -> str:
+def _session_open(ip: str, cid: str, socket: WebSocket) -> str:
     global _session_seq
     _session_seq += 1
     sid = f"u{_session_seq}"
@@ -286,9 +315,9 @@ def _session_open(ip: str, socket: WebSocket) -> str:
         f = open(path, "w", encoding="utf-8")
     except Exception:
         f, path = None, None
-    # Keep ip only internally (for geolocation); the viewer never sees it.
+    # Keep ip/cid only internally (geolocation / bans); the viewer never sees them.
     sessions[sid] = {
-        "text": "", "ip": ip, "flag": "🌐", "file": f, "path": path,
+        "text": "", "ip": ip, "cid": cid, "flag": "🌐", "file": f, "path": path,
         "socket": socket, "score": None,
     }
     return sid
@@ -445,6 +474,21 @@ async def sessions_ws(socket: WebSocket):
                     await socket.send_text(json.dumps({"error": "wrong admin password"}))
                 else:
                     await _clear_session(m.get("id"))
+            # Admin: ban one user's browser (disconnect now + block reconnects).
+            elif m.get("action") == "ban":
+                if m.get("password") != ADMIN_PASSWORD:
+                    await socket.send_text(json.dumps({"error": "wrong admin password"}))
+                else:
+                    s = sessions.get(m.get("id"))
+                    if s is not None:
+                        _ban_cid(s.get("cid"))
+                        sock = s.get("socket")
+                        if sock is not None:
+                            try:
+                                await sock.send_text(json.dumps({"banned": True}))
+                                await sock.close(code=1008)
+                            except Exception:
+                                pass
     except (WebSocketDisconnect, RuntimeError):
         return
     finally:
@@ -454,10 +498,18 @@ async def sessions_ws(socket: WebSocket):
 @app.websocket("/ws")
 async def ws(socket: WebSocket):
     await socket.accept()
+    ip = _client_ip(socket)
+    cid = socket.query_params.get("cid", "")
+    if cid and cid in BANNED_CIDS:  # blocked browser — don't create a session
+        try:
+            await socket.send_text(json.dumps({"banned": True}))
+            await socket.close(code=1008)
+        except Exception:
+            pass
+        return
     engine.start()  # idempotent; ensures the worker runs on the live event loop
     clients.add(socket)
-    ip = _client_ip(socket)
-    sid = _session_open(ip, socket)  # one streaming file per active user
+    sid = _session_open(ip, cid, socket)  # one streaming file per active user
     await _viewer_broadcast({"type": "open", "id": sid, "flag": sessions[sid]["flag"]})
     asyncio.create_task(_geolocate_session(sid, ip))  # resolve the flag in the background
     await socket.send_text(

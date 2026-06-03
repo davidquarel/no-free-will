@@ -31,6 +31,7 @@ let lastTokens = [];  // last server-confirmed token render, reused while typing
 let currentModel = null;   // the globally-loaded model
 let adminPassword = null;  // set once the admin password is verified
 let lastServerId = null;   // detect a server restart across reconnects
+let banned = false;        // stop reconnecting if we've been IP-banned
 
 function escapeHtml(s) {
   return s
@@ -230,12 +231,31 @@ function syncScroll() {
   backdrop.scrollLeft = input.scrollLeft;
 }
 
+// Per-browser id (persisted) so an admin can ban THIS browser specifically,
+// rather than the whole IP. Cleared storage / incognito gets a fresh id.
+function getClientId() {
+  try {
+    let cid = localStorage.getItem("nfw_cid");
+    if (!cid) {
+      cid = (window.crypto && crypto.randomUUID && crypto.randomUUID()) ||
+            Math.random().toString(36).slice(2);
+      localStorage.setItem("nfw_cid", cid);
+    }
+    return cid;
+  } catch {
+    return Math.random().toString(36).slice(2);
+  }
+}
+const clientId = getClientId();
+
 function connect() {
+  if (banned) return; // don't reconnect once banned
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  socket = new WebSocket(`${proto}://${location.host}/ws`);
+  socket = new WebSocket(`${proto}://${location.host}/ws?cid=${encodeURIComponent(clientId)}`);
 
   socket.onopen = () => setStatus("connected", "ok");
   socket.onclose = () => {
+    if (banned) { setStatus("you have been banned", "err"); return; }
     setStatus("disconnected · retrying…", "err");
     setTimeout(connect, 1500);
   };
@@ -243,6 +263,13 @@ function connect() {
 
   socket.onmessage = (ev) => {
     const data = JSON.parse(ev.data);
+    if (data.banned) {
+      banned = true;
+      setStatus("you have been banned", "err");
+      input.disabled = true;
+      clearEditor();
+      return;
+    }
     if (data.error) {
       setStatus(data.error, "err");
       if (currentModel) modelSelect.value = currentModel; // undo a rejected switch
