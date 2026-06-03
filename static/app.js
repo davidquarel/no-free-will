@@ -414,7 +414,19 @@ reloadBtn.addEventListener("click", () => location.reload());
 checkVersion();
 setInterval(checkVersion, 4000);
 
-renderTyping(input.value);
+// Start blank on every load — don't let the browser resurrect old text on a
+// refresh or back/forward (bfcache). pageshow fires after any restoration.
+function clearEditor() {
+  input.value = "";
+  lastTokens = [];
+  renderTyping("");
+  predictionsEl.innerHTML = "";
+  accuracyEl.textContent = "—";
+  ghost.textContent = "";
+}
+window.addEventListener("pageshow", clearEditor);
+
+clearEditor();
 connect();
 connectLogs();
 connectGpu();
