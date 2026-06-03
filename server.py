@@ -40,6 +40,12 @@ MODELS = [
     {"id": "Qwen/Qwen3-4B-Base", "label": "Qwen3 4B base · ~8GB bf16 (recommended)"},
     {"id": "Qwen/Qwen3-8B-Base", "label": "Qwen3 8B base · ~5.5GB (4-bit — quantized)", "quant": "4bit"},
     {"id": "Qwen/Qwen3-14B-Base", "label": "Qwen3 14B base · ~9GB (4-bit — quantized)", "quant": "4bit"},
+    # Alternative / larger base models. 7B–8B only fit 16GB in 4-bit.
+    {"id": "openbmb/MiniCPM5-1B", "label": "MiniCPM5 1B base · bf16"},
+    {"id": "Qwen/Qwen2.5-7B", "label": "Qwen2.5 7B base · 4-bit", "quant": "4bit"},
+    {"id": "tiiuae/Falcon3-7B-Base", "label": "Falcon3 7B base · 4-bit", "quant": "4bit"},
+    {"id": "meta-llama/Llama-3.1-8B", "label": "Llama 3.1 8B base · 4-bit (gated; needs HF token)", "quant": "4bit"},
+    {"id": "google/gemma-4-E4B", "label": "Gemma 4 E4B · experimental (multimodal — may not load)"},
     {"id": "mock", "label": "Mock (no GPU — UI test)"},
 ]
 
