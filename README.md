@@ -14,13 +14,14 @@ works — just set `MODEL_NAME`.
 
 ## Quick start
 
-After cloning, one command installs everything (via `uv`) and serves the app:
+After cloning, install dependencies once, then serve:
 
 ```bash
-bash run.sh
+bash setup.sh    # one-time: installs uv + a .venv with all deps
+bash run.sh      # start the server (re-run this whenever you want to serve)
 ```
 
-This defaults to **Qwen3-14B-Base in 4-bit**, which fits a single 16GB GPU
+`run.sh` defaults to **Qwen3-14B-Base in 4-bit**, which fits a single 16GB GPU
 (~9GB) while keeping ~Qwen2.5-32B-Base quality. It serves on port **8080** by
 default. First run downloads the weights from HuggingFace. Then open
 <http://localhost:8080>.
