@@ -99,8 +99,14 @@ main {
 #ghost { color: var(--muted); opacity: 0.55; }
 #ghost::before { content: ""; }
 
-/* surprisal-colored tokens are inline spans set from JS */
-.tok { border-radius: 3px; }
+/* Each token is an inline span with a surprisal-colored *background* chip
+   (set from JS). A faint inset line on the left edge delineates every token
+   boundary — including subword splits — without changing layout (no
+   padding/border), so the backdrop stays aligned with the textarea caret. */
+.tok {
+  border-radius: 2px;
+  box-shadow: inset 1px 0 0 rgba(230, 237, 243, 0.16);
+}
 
 /* --- side panel --- */
 .panel {
@@ -112,7 +118,18 @@ main {
   top: 16px;
 }
 
-.model-picker { display: block; margin-bottom: 16px; }
+.model-picker { display: block; margin-bottom: 8px; }
+.model-warning {
+  margin: 0 0 16px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #e3b341;
+  background: rgba(187, 128, 9, 0.12);
+  border: 1px solid rgba(187, 128, 9, 0.35);
+  border-radius: 6px;
+}
+.model-warning strong { color: #f0c674; }
 .model-picker span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
 #model {
   width: 100%;
@@ -161,3 +178,37 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 
 .settings { margin-top: 20px; color: var(--muted); font-size: 13px; }
 .settings input { width: 56px; background: #0d1117; color: var(--fg); border: 1px solid #30363d; border-radius: 4px; padding: 2px 4px; }
+
+/* --- live server-log terminal below the editor --- */
+.logs {
+  max-width: 1100px;
+  margin: 0 auto 48px;
+  padding: 0 24px;
+}
+.logs-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.logs-status { text-transform: none; letter-spacing: normal; font-family: var(--mono); }
+.logterm {
+  margin: 0;
+  height: 240px;
+  overflow-y: auto;
+  background: #07090d;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: #8ddb9b;
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 8;
+}

@@ -20,12 +20,15 @@ import threading
 from typing import Any
 
 
-def build_predictor(model_name: str | None = None) -> "BasePredictor":
-    """Factory: pick a predictor from MODEL_NAME (or the given name)."""
+def build_predictor(model_name: str | None = None, quantize: str | None = None) -> "BasePredictor":
+    """Factory: pick a predictor from MODEL_NAME (or the given name).
+
+    `quantize` ("4bit"/"8bit"/"" for none) is resolved per-model by the caller;
+    if left None, HFPredictor falls back to the QUANTIZE env var."""
     name = model_name or os.environ.get("MODEL_NAME", "gpt2")
     if name == "mock":
         return MockPredictor()
-    return HFPredictor(name)
+    return HFPredictor(name, quantize=quantize)
 
 
 class BasePredictor:
@@ -33,6 +36,12 @@ class BasePredictor:
 
     def predict(self, text: str, k: int = 10) -> dict[str, Any]:
         raise NotImplementedError
+
+    def predict_batch(self, reqs: list[tuple[str, int]]) -> list[dict[str, Any]]:
+        """Predict several (text, k) requests at once. Default: just loop. The
+        HF predictor overrides this with a single padded forward pass so that
+        concurrent users share one GPU call."""
+        return [self.predict(text, k) for text, k in reqs]
 
 
 class HFPredictor(BasePredictor):
@@ -44,7 +53,7 @@ class HFPredictor(BasePredictor):
     text the user sees.
     """
 
-    def __init__(self, model_name: str = "gpt2"):
+    def __init__(self, model_name: str = "gpt2", quantize: str | None = None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -71,7 +80,9 @@ class HFPredictor(BasePredictor):
         # Optional bitsandbytes quantization (CUDA only), set via QUANTIZE=
         # "4bit" or "8bit". 4-bit NF4 lets a 14B model run in ~9GB so it fits a
         # single 16GB card while keeping most of its quality.
-        quant = os.environ.get("QUANTIZE", "").lower().replace("-", "")
+        # Per-model choice wins; fall back to the QUANTIZE env var if unset.
+        quant = quantize if quantize is not None else os.environ.get("QUANTIZE", "")
+        quant = (quant or "").lower().replace("-", "")
         quant_config = None
         if self.device == "cuda" and quant in ("4bit", "4", "nf4"):
             from transformers import BitsAndBytesConfig
@@ -130,45 +141,86 @@ class HFPredictor(BasePredictor):
         return self.tokenizer.decode([token_id])
 
     def predict(self, text: str, k: int = 10) -> dict[str, Any]:
+        return self.predict_batch([(text, k)])[0]
+
+    def predict_batch(self, reqs: list[tuple[str, int]]) -> list[dict[str, Any]]:
+        """Run several requests through a single padded forward pass.
+
+        Sequences are LEFT-padded so every row's final real token lands at
+        index -1 (uniform next-token slice), and explicit position_ids + an
+        attention mask keep results identical to the unbatched path — correct
+        even for models with learned absolute positions (e.g. GPT-2), not just
+        RoPE models. The per-token bookkeeping is the unbatched logic shifted by
+        each row's left-pad width."""
         torch = self.torch
         with self._lock, torch.no_grad():
-            ids = self.tokenizer.encode(text, add_special_tokens=False)
-            input_ids = ([self.prefix_id] if self.prefix_id is not None else []) + ids
-            # Need at least one token to get a "next token" distribution.
-            if not input_ids:
-                input_ids = [self.prefix_id if self.prefix_id is not None else 0]
+            # Encode every request and prepend the one start token.
+            seqs = []  # (full_input_ids, content_ids)
+            for text, _k in reqs:
+                ids = self.tokenizer.encode(text, add_special_tokens=False)
+                full = ([self.prefix_id] if self.prefix_id is not None else []) + ids
+                if not full:  # need >=1 token to get a next-token distribution
+                    full = [self.prefix_id if self.prefix_id is not None else 0]
+                seqs.append((full, ids))
 
-            tensor = torch.tensor([input_ids], device=self.input_device)
-            # Upcast logits to fp32 before softmax for stable probabilities
-            # even when the model runs in bf16/fp16.
-            logits = self.model(tensor).logits[0].float()  # (seq, vocab)
+            B = len(seqs)
+            S = max(len(full) for full, _ in seqs)
+            pad_id = self.tokenizer.pad_token_id
+            if pad_id is None:
+                pad_id = self.tokenizer.eos_token_id
+            if pad_id is None:
+                pad_id = 0
+
+            input_ids = torch.full((B, S), pad_id, dtype=torch.long)
+            attn = torch.zeros((B, S), dtype=torch.long)
+            for b, (full, _ids) in enumerate(seqs):
+                L = len(full)
+                input_ids[b, S - L:] = torch.tensor(full, dtype=torch.long)  # left pad
+                attn[b, S - L:] = 1
+            input_ids = input_ids.to(self.input_device)
+            attn = attn.to(self.input_device)
+            # Correct 0-based positions for each (left-padded) row.
+            position_ids = (attn.long().cumsum(-1) - 1).clamp(min=0)
+
+            # Upcast logits to fp32 before softmax for stable probabilities even
+            # when the model runs in bf16/fp16/4-bit.
+            logits = self.model(
+                input_ids=input_ids, attention_mask=attn, position_ids=position_ids
+            ).logits.float()  # (B, S, vocab)
             logprobs = torch.log_softmax(logits, dim=-1)
 
-            # --- top-k prediction for the NEXT token (from the last position) ---
-            last = logprobs[-1]
-            top = torch.topk(last, min(k, last.shape[-1]))
-            predictions = [
-                {"token": self._decode(int(tid)), "prob": float(math.exp(lp))}
-                for lp, tid in zip(top.values.tolist(), top.indices.tolist())
-            ]
-
-            # --- per-token analysis of the text the user already typed ---
-            # Token at position i (in `ids`) is predicted by row (offset + i - 1).
             offset = 1 if self.prefix_id is not None else 0
-            tokens = []
-            for i, tid in enumerate(ids):
-                row = logprobs[offset + i - 1] if (offset + i - 1) >= 0 else None
-                if row is None:
-                    tokens.append({"text": self._decode(tid), "prob": None, "rank": None})
-                    continue
-                lp = float(row[tid])
-                # rank = number of tokens strictly more likely than this one.
-                rank = int((row > row[tid]).sum().item())
-                tokens.append(
-                    {"text": self._decode(tid), "prob": float(math.exp(lp)), "rank": rank}
-                )
+            out = []
+            for b, (full, ids) in enumerate(seqs):
+                k = reqs[b][1]
+                pad_b = S - len(full)
 
-        return {"model": self.name, "predictions": predictions, "tokens": tokens}
+                # --- top-k prediction for the NEXT token (last position) ---
+                last = logprobs[b, -1]
+                top = torch.topk(last, min(k, last.shape[-1]))
+                predictions = [
+                    {"token": self._decode(int(tid)), "prob": float(math.exp(lp))}
+                    for lp, tid in zip(top.values.tolist(), top.indices.tolist())
+                ]
+
+                # --- per-token analysis of the already-typed text ---
+                # Content token i is predicted by unbatched row (offset+i-1),
+                # which sits at (pad_b + offset + i - 1) once left-padded.
+                tokens = []
+                for i, tid in enumerate(ids):
+                    j = offset + i - 1
+                    if j < 0:
+                        tokens.append({"text": self._decode(tid), "prob": None, "rank": None})
+                        continue
+                    row = logprobs[b, pad_b + j]
+                    lp = float(row[tid])
+                    rank = int((row > row[tid]).sum().item())  # tokens strictly more likely
+                    tokens.append(
+                        {"text": self._decode(tid), "prob": float(math.exp(lp)), "rank": rank}
+                    )
+
+                out.append({"model": self.name, "predictions": predictions, "tokens": tokens})
+            return out
 
 
 class MockPredictor(BasePredictor):

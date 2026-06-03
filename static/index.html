@@ -12,8 +12,8 @@
     <p class="tagline">
       Start typing. A language model is racing to guess your next token before
       you commit it. Your words are tinted by how much you
-      <span class="legend green">surprised</span> /
-      <span class="legend red">bored</span> it.
+      <span class="legend green">bored</span> /
+      <span class="legend red">surprised</span> it.
     </p>
   </header>
 
@@ -31,6 +31,11 @@
         <span>model</span>
         <select id="model"></select>
       </label>
+      <p class="model-warning">
+        ⚠ One model is loaded for everyone at once — switching it changes the
+        model for <strong>all connected users</strong>. This keeps VRAM low and
+        lets everyone's requests share a single batched forward pass.
+      </p>
 
       <div class="stat">
         <div class="stat-big"><span id="accuracy">—</span></div>
@@ -50,6 +55,14 @@
       </details>
     </aside>
   </main>
+
+  <section class="logs">
+    <div class="logs-bar">
+      <span>server log</span>
+      <span class="logs-status" id="logstatus">connecting…</span>
+    </div>
+    <pre id="logterm" class="logterm" aria-live="off"></pre>
+  </section>
 
   <script src="app.js"></script>
 </body>

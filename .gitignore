@@ -6,3 +6,8 @@ venv/
 # HF model cache, if pointed here
 .cache/
 *.egg-info/
+# logs (incl. the in-page terminal's app.log)
+*.log
+# cloudflared tunnel binary + its artifacts
+cloudflared
+TUNNEL_URL.txt

@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
 #
 # Serve the app. Run setup.sh once first to install dependencies.
-# Defaults to Qwen3-14B-Base in 4-bit, which fits a single 16GB GPU (~9GB)
-# while keeping ~Qwen2.5-32B-Base quality.
+# Defaults to Qwen3-4B-Base in FULL bf16 (~8GB) — strong and unquantized, so no
+# quantization "brain damage". Bigger models (8B/14B) auto-load in 4-bit since
+# that's the only way they fit 16GB; pick them from the in-page dropdown.
 #
 #   bash run.sh                 # serve on port 8080
 #   bash run.sh --port 9000     # serve on a different port
 #
 # Override anything via env vars, e.g.:
-#   MODEL_NAME=Qwen/Qwen3-8B-Base bash run.sh
-#   QUANTIZE= MODEL_NAME=Qwen/Qwen3-4B-Base bash run.sh   # no quantization (fits bf16)
-#   TUNNEL=1 bash run.sh                                   # also open a public cloudflared URL
+#   MODEL_NAME=Qwen/Qwen3-8B-Base bash run.sh   # start on a bigger model
+#   QUANTIZE=4bit bash run.sh                    # force 4-bit for EVERY model
+#   TUNNEL=1 bash run.sh                         # also open a public cloudflared URL
 #
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-14B-Base}"
-QUANTIZE="${QUANTIZE-4bit}"     # set QUANTIZE= (empty) to disable
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B-Base}"
+QUANTIZE="${QUANTIZE-}"        # empty = per-model default (bf16 ≤4B, 4-bit for 8B/14B)
 PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
+LOG_FILE="${APP_LOG:-app.log}"
 
 # CLI args (override the env defaults above).
 while [ $# -gt 0 ]; do
@@ -44,20 +46,23 @@ if [ ! -d .venv ]; then
   exit 1
 fi
 
-SERVE=(env MODEL_NAME="$MODEL_NAME" QUANTIZE="$QUANTIZE"
+SERVE=(env MODEL_NAME="$MODEL_NAME" QUANTIZE="$QUANTIZE" APP_LOG="$LOG_FILE"
        uv run uvicorn server:app --host "$HOST" --port "$PORT")
 
-echo ">> serving ${MODEL_NAME} (QUANTIZE='${QUANTIZE}') on ${HOST}:${PORT}"
+echo ">> serving ${MODEL_NAME} (QUANTIZE='${QUANTIZE:-per-model}') on ${HOST}:${PORT}"
+echo ">> logs stream to the terminal AND ${LOG_FILE} (the in-page terminal tails it)"
 
-# Without a tunnel, just serve in the foreground.
+# Without a tunnel, just serve in the foreground. tee so the in-page log
+# terminal can tail app.log while you still see everything here.
 if [ "${TUNNEL:-0}" != "1" ]; then
   echo ">> open http://localhost:${PORT}  (or use an SSH tunnel / TUNNEL=1 for a public URL)"
-  exec "${SERVE[@]}"
+  "${SERVE[@]}" 2>&1 | tee "$LOG_FILE"
+  exit "${PIPESTATUS[0]}"
 fi
 
 # --- TUNNEL path: start the server, wait until it answers, THEN open the
 #     tunnel so the public URL never points at a not-yet-listening port. ---
-"${SERVE[@]}" &
+"${SERVE[@]}" > >(tee "$LOG_FILE") 2>&1 &
 SERVER_PID=$!
 cleanup() { kill "$SERVER_PID" 2>/dev/null || true; kill "${CF_PID:-}" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
