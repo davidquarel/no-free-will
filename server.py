@@ -197,6 +197,27 @@ sessions: dict[str, dict] = {}        # id -> {"text", "ip", "file", "path"}
 viewers: set[WebSocket] = set()       # /sessions viewer sockets
 _session_seq = 0
 
+# Identifies this server process; sent in the hello so the client can tell when
+# the server has restarted (and clear its editor instead of resurrecting text).
+SERVER_ID = os.getpid()
+
+
+def _reset_sessions_dir() -> None:
+    """Wipe leftover conversation files from a previous run on startup, so old
+    text can't survive a server restart."""
+    try:
+        for fn in os.listdir(SESSIONS_DIR):
+            if fn.endswith(".txt"):
+                try:
+                    os.remove(os.path.join(SESSIONS_DIR, fn))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+_reset_sessions_dir()
+
 
 async def _viewer_broadcast(event: dict) -> None:
     payload = json.dumps(event)
@@ -443,6 +464,7 @@ async def ws(socket: WebSocket):
         json.dumps({
             "models": MODELS, "default": DEFAULT_MODEL,
             "current": manager.desired_name, "max_tokens": Runtime.max_tokens,
+            "server_id": SERVER_ID,
         })
     )
 

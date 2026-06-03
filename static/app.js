@@ -30,6 +30,7 @@ let socket = null;
 let lastTokens = [];  // last server-confirmed token render, reused while typing
 let currentModel = null;   // the globally-loaded model
 let adminPassword = null;  // set once the admin password is verified
+let lastServerId = null;   // detect a server restart across reconnects
 
 function escapeHtml(s) {
   return s
@@ -248,6 +249,10 @@ function connect() {
       return;
     }
     if (data.models) {
+      // If the server restarted (new PID) since we last connected, the old text
+      // is dead — clear the editor instead of re-predicting it.
+      if (lastServerId !== null && data.server_id !== lastServerId) clearEditor();
+      lastServerId = data.server_id;
       populateModels(data.models, data.current || data.default);
       setCurrentModel(data.current || data.default);
       if (data.max_tokens) maxTokensInput.value = data.max_tokens;
