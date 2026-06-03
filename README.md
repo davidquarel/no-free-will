@@ -21,13 +21,14 @@ bash run.sh
 ```
 
 This defaults to **Qwen3-14B-Base in 4-bit**, which fits a single 16GB GPU
-(~9GB) while keeping ~Qwen2.5-32B-Base quality. First run downloads the weights
-from HuggingFace. Then open <http://localhost:8000>.
+(~9GB) while keeping ~Qwen2.5-32B-Base quality. It serves on port **8080** by
+default. First run downloads the weights from HuggingFace. Then open
+<http://localhost:8080>.
 
-Override via env vars:
+Pick a port with `--port`, and override the rest via env vars:
 
 ```bash
-PORT=8080 bash run.sh                                  # different port
+bash run.sh --port 9000                                # different port
 MODEL_NAME=Qwen/Qwen3-8B-Base bash run.sh              # different model (still 4-bit)
 QUANTIZE= MODEL_NAME=Qwen/Qwen3-4B-Base bash run.sh    # no quantization (fits bf16)
 TUNNEL=1 bash run.sh                                   # also print a public cloudflared URL
