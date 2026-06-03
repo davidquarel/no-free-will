@@ -14,6 +14,7 @@ const backdrop = document.getElementById("backdrop");
 const predictionsEl = document.getElementById("predictions");
 const accuracyEl = document.getElementById("accuracy");
 const statusEl = document.getElementById("status");
+const tokenCountEl = document.getElementById("tokencount");
 const topkInput = document.getElementById("topk");
 const modelSelect = document.getElementById("model");
 const modelNow = document.getElementById("modelnow");
@@ -125,6 +126,16 @@ function renderResult(data) {
 
   renderPredictions(preds);
   renderAccuracy(tokens);
+  renderTokenCount(data);
+}
+
+// Persistent token readout: current / max, flagged when truncated.
+function renderTokenCount(data) {
+  if (typeof data.n_tokens !== "number" || !data.max_tokens) return;
+  const truncated = data.n_tokens_total > data.max_tokens;
+  tokenCountEl.textContent =
+    `${data.n_tokens_total} / ${data.max_tokens} tokens` + (truncated ? " · truncated" : "");
+  tokenCountEl.className = "tokens" + (truncated ? " warn" : "");
 }
 
 function renderPredictions(preds) {
@@ -286,12 +297,7 @@ function connect() {
     // Drop out-of-order/stale responses.
     if (typeof data.seq === "number" && data.seq < lastRenderedSeq) return;
     lastRenderedSeq = data.seq ?? lastRenderedSeq;
-    let tok = "";
-    if (typeof data.n_tokens === "number" && data.max_tokens) {
-      const truncated = data.n_tokens_total > data.max_tokens;
-      tok = ` · ${data.n_tokens}/${data.max_tokens} tok${truncated ? " (truncated)" : ""}`;
-    }
-    setStatus(`model: ${data.model}${tok}`, data.n_tokens_total > data.max_tokens ? "" : "ok");
+    setStatus(`model: ${data.model}`, "ok");
     renderResult(data);
   };
 }
