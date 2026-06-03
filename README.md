@@ -4,132 +4,172 @@ A website where you type freely while a language model races to predict your
 next token **before you commit it**. As you type:
 
 - the model's **#1 next-token guess** trails your cursor as faded ghost text;
-- your words are **tinted by surprisal** — green where the model predicted you,
-  red where you surprised it;
-- a side panel shows the **top-k next-token distribution** with live bars and a
-  running score: *"X% of your tokens were the model's #1 guess"*.
+- each **token is highlighted by surprisal** — green where the model predicted
+  you (it was *bored*), red where you surprised it — so subword splits are
+  visible, not just whole words;
+- a side panel shows the **top-k next-token distribution** with live bars, the
+  **token count** (`current / max`), and a **word-level score**: *"X% of your
+  words the model nailed"* — a word only counts if **every** token in it was the
+  model's #1 guess.
 
-Default model is **gpt2** (a.k.a. gpt2-small), but any HuggingFace causal LM
-works — just set `MODEL_NAME`.
+Everyone shares **one model at a time** (kept in VRAM), and concurrent typists
+are **batched into a single forward pass**. The default model is
+**Qwen2.5-7B** in full bf16.
+
+There's also a **live feed** at `/viewer.html` showing every connected person's
+typing in real time, with a country flag and their live score.
 
 ## Quick start
 
-After cloning, install dependencies once, then serve:
-
 ```bash
 bash setup.sh    # one-time: installs uv + a .venv with all deps
-bash run.sh      # start the server (re-run this whenever you want to serve)
+bash run.sh      # serve on http://localhost:8080  (re-run to serve)
 ```
 
-`run.sh` defaults to **Qwen3-14B-Base in 4-bit**, which fits a single 16GB GPU
-(~9GB) while keeping ~Qwen2.5-32B-Base quality. It serves on port **8080** by
-default. First run downloads the weights from HuggingFace. Then open
-<http://localhost:8080>.
+First run downloads the model from HuggingFace (~15 GB for the 7B). Logs stream
+to the terminal **and** to an in-page panel. Then open <http://localhost:8080>.
 
-Pick a port with `--port`, and override the rest via env vars:
+Common overrides (env vars + `--port`):
 
 ```bash
-bash run.sh --port 9000                                # different port
-MODEL_NAME=Qwen/Qwen3-8B-Base bash run.sh              # different model (still 4-bit)
-QUANTIZE= MODEL_NAME=Qwen/Qwen3-4B-Base bash run.sh    # no quantization (fits bf16)
-TUNNEL=1 bash run.sh                                   # also print a public cloudflared URL
+bash run.sh --port 9000                      # different port
+MODEL_NAME=Qwen/Qwen3-4B-Base bash run.sh    # start on a different model
+TUNNEL=1 bash run.sh                         # also open a public cloudflared URL
+ADMIN_PASSWORD='secret' bash run.sh          # set the admin password (see below)
+MODEL_NAME=mock bash run.sh                  # UI only, no torch/GPU
 ```
 
 ### Manual run
 
 ```bash
 pip install -r requirements.txt
-MODEL_NAME=Qwen/Qwen3-14B-Base QUANTIZE=4bit uvicorn server:app --host 0.0.0.0 --port 8000
+MODEL_NAME=Qwen/Qwen2.5-7B uvicorn server:app --host 0.0.0.0 --port 8080
 ```
 
-To let other people visit, run it on your GPU box and point them at that
-machine's address (or front it with a tunnel — see below).
+## Models & quantization
 
-### Quantization (fit big models on small GPUs)
+Switch the model from the **admin panel dropdown** in the page (see below). Only
+one model is loaded at a time — switching **evicts** the previous one and
+changes it for **everyone** (all clients re-sync). The curated list is
+base/pretrained models, sized for a single **16 GB** GPU:
 
-`QUANTIZE=4bit` (NF4 via bitsandbytes) roughly quarters the weight footprint, so
-a 14B model runs in ~9GB instead of ~28GB. `QUANTIZE=8bit` halves it. Leave
-`QUANTIZE` empty to load full bf16. Quantization is CUDA-only and applies to
-whichever model is selected.
+| Model | How it loads on 16 GB |
+|-------|-----------------------|
+| GPT-2 small · Qwen3 0.6B/1.7B/4B · MiniCPM5-1B | full **bf16** |
+| Qwen2.5-7B, Falcon3-7B (**default-class**) | full **bf16** (~14 GB) |
+| Qwen3-8B, Llama-3.1-8B | **8-bit** (near-lossless) |
+| Qwen3-14B | **4-bit** (only thing that needs it) |
 
-### Choosing a model
+Quantization is chosen **per model** automatically (small → bf16, 8B → 8-bit,
+14B → 4-bit), because 4-bit measurably hurts next-token calibration and we only
+use it when nothing else fits. Override globally with `QUANTIZE=4bit|8bit` (CUDA
+only); leave it empty for per-model defaults. `MODEL_NAME` sets the startup
+model and may be any HuggingFace causal LM id (custom ids join the dropdown).
 
-There's a **dropdown in the page** to switch models live (it changes the model
-for everyone — only one model is held in memory at a time, and switching evicts
-the previous one). The curated list is base/pretrained models suited to
-next-token prediction. **Qwen3-14B-Base** is the recommended strong pick:
-Qwen reports it matching Qwen2.5-32B-Base quality, and at ~28GB (bf16) it shards
-comfortably across a 4xA4000 box.
+> Llama-3.1-8B is **gated** — needs an accepted license and a `HF_TOKEN`.
+> `gemma-4-E4B` is listed but **experimental** (it's a multimodal
+> `*ForConditionalGeneration`, so it may not load via the causal-LM path).
 
-`MODEL_NAME` sets the default and may be any HuggingFace causal LM id (custom
-ids are added to the dropdown automatically):
+## Admin panel
+
+Some actions are gated by an admin password, enforced **server-side** (the
+dropdown/buttons are just cosmetic — the server rejects any action without the
+password). The password is read **only** from the `ADMIN_PASSWORD` env var; if
+unset, a random one is generated into `admin_password.txt` (gitignored) and
+**not printed** (the log is public). Start with your own:
 
 ```bash
-MODEL_NAME=Qwen/Qwen3-14B-Base uvicorn server:app --host 0.0.0.0 --port 8000
+ADMIN_PASSWORD='whatever' bash run.sh
 ```
 
-### Multi-GPU / sharding
+Unlock the **🔒 admin** panel in the side bar to:
 
-When more than one CUDA device is visible, models load with
-`device_map="auto"` and shard across all of them automatically — no flags
-needed. So on 4xA4000 (~64GB total) a 14B model just works; inputs go to
-`cuda:0` and activations hop between cards.
+- **switch the model** (affects everyone);
+- **adjust the token cap** — `MAX_TOKENS` (default **8192**) bounds VRAM by
+  truncating each request; the status shows `current / max tok (truncated)`.
 
-Weights load in **bf16** (or fp16 if bf16 is unsupported), so a 14B model is
-~28GB rather than ~56GB. The server auto-selects `cuda` → `mps` → `cpu`.
+## Live conversations (`/viewer.html`)
 
-To pin which GPUs are used: `CUDA_VISIBLE_DEVICES=0,1,2,3 uvicorn ...`.
+A separate page streams every connected user's current text live (one panel
+each, appearing/updating/disappearing as people type and come/go). Each panel
+shows a **country flag** (geolocated from the IP via ip-api — the raw **IP is
+never sent to the browser**) and the user's **live word-prediction score**.
 
-### Beginning-of-sequence handling
+Unlock with the admin password to get, per panel:
 
-Text is encoded **without** the tokenizer's automatic special tokens, then
-exactly one start token is prepended so the first typed token has the context
-the model expects: a model's real BOS where it has one (Llama/SmolLM style), or
-`<|endoftext|>` (the pretraining document separator) for GPT-2 / Qwen, which
-have no dedicated BOS. This avoids the double-BOS that naive `encode()` causes.
+- **✕ delete** — wipe that conversation (and clear that user's editor);
+- **ban** — block that **browser** (a per-browser token, *not* the IP, so it
+  won't catch NAT/household neighbours; evadable via incognito). Bans persist to
+  `banned_clients.txt` and there's an **unban list** in the same panel.
 
-### No GPU / no torch? Mock mode
+Conversations are **ephemeral**: each active user maps to `sessions/<id>.txt`,
+rewritten per keystroke and **deleted on disconnect**; the dir is also wiped on
+startup. Nothing is archived, and the text appears in no logs.
 
-```bash
-MODEL_NAME=mock uvicorn server:app --port 8000
-```
+## Observability
 
-Runs the full website with a fake predictor and **no torch/transformers
-dependency** — useful for trying the UI or developing the frontend.
+Below the editor are two live terminals:
+
+- **server log** — streams `app.log` (model download/load progress included);
+- **GPU** — an nvtop-style readout via `gpustat` (util / mem / temp + processes),
+  refreshing each second.
+
+A pill in the header shows whether you're running the latest code: **green** =
+up to date, **yellow** = a static change needs a page reload *or* a backend
+(`.py`) change needs a **server restart** (a browser can't restart the server,
+so that one only clears when you restart the process).
 
 ## Hosting for visitors
 
-The app is a single FastAPI process serving static files plus a WebSocket
-(`/ws`), so anything that proxies WebSockets works:
+A single FastAPI process serves static files plus WebSockets (`/ws`, `/logs`,
+`/gpu`, `/sessions`), so anything that proxies WebSockets works:
 
-- **Quick share:** `cloudflared tunnel --url http://localhost:8000` or
-  `ngrok http 8000` gives you a public URL in seconds.
-- **Behind nginx/Caddy:** proxy `/` and `/ws` to the uvicorn port; the client
-  auto-uses `wss://` when served over HTTPS.
+- **Quick share:** `TUNNEL=1 bash run.sh` starts cloudflared and prints a public
+  URL; or run `cloudflared tunnel --url http://localhost:8080` yourself.
+- **Behind nginx/Caddy:** proxy `/` and the WebSocket paths to the uvicorn port;
+  the client auto-uses `wss://` over HTTPS.
 
-Inference is serialized with a lock and recomputed per keystroke (debounced
-client-side to ~14 req/s), so a single GPU comfortably serves a handful of
-simultaneous typists with gpt2-small. For heavier load, run multiple workers
-behind the proxy.
+Dynamic batching means a single GPU serves a handful of simultaneous typists
+comfortably. Tune with `MAX_BATCH` (default 8) and `BATCH_WINDOW_MS` (default 8).
 
 ## How it works
 
-- **`predictors.py`** — `HFPredictor` loads any causal LM. For each request it
-  runs one forward pass over the current text and returns the top-k next-token
-  distribution *and* per-token probability/rank for the text already typed (so
-  the UI can color surprisal and score the model). A `MockPredictor` mirrors the
-  same interface with zero heavy deps.
-- **`server.py`** — FastAPI app. `/ws` streams predictions; the model is loaded
-  lazily on first connect so the page comes up instantly. Static frontend is
-  served from `static/`.
-- **`static/`** — a transparent `<textarea>` stacked over a styled backdrop that
-  renders surprisal-colored token spans + the ghost prediction. The backdrop
-  updates instantly to plain text on each keystroke and is *upgraded* to colored
-  tokens once the matching model result arrives, so the caret never drifts.
+- **`predictors.py`** — `HFPredictor` loads any causal LM. `predict_batch` runs
+  several requests through **one left-padded forward pass** (correct
+  `position_ids` + attention mask, so results match the unbatched path even on
+  absolute-position models like GPT-2). It returns the top-k next-token
+  distribution *and* per-token probability/rank for the text already typed, and
+  only `log_softmax`es the rows it reads (so the full `B×S×vocab` logits never
+  hit fp32 — that's what lets a 7B run in bf16 on 16 GB). A `MockPredictor`
+  mirrors the interface with zero heavy deps.
+- **`server.py`** — FastAPI app. A `BatchEngine` coalesces concurrent `/ws`
+  requests; a `ModelManager` holds the one global model and serializes swaps.
+  Also serves `/logs`, `/gpu`, `/sessions` (the viewer feed), `/api/config`,
+  and `/api/version`.
+- **`static/`** — a transparent `<textarea>` over a styled backdrop that renders
+  surprisal-colored token chips + the ghost prediction. While you type, the
+  already-scored prefix keeps its colors and only the new tail is plain, so the
+  highlighting never flickers. `viewer.html` is the live feed.
 
-### Notes
+### Beginning-of-sequence handling
 
-- Predictions are at the **token** level (BPE), so the ghost text may be a word
-  fragment — that's the model's actual unit of prediction.
-- For non-ASCII text where a character spans multiple BPE tokens, per-token
-  coloring gracefully falls back to plain (uncolored) text for that snapshot.
+Text is encoded **without** the tokenizer's automatic specials, then exactly one
+start token is prepended so the first typed token has the context the model
+expects: a model's real BOS where it has one (Llama/SmolLM style), or
+`<|endoftext|>` (the pretraining document separator) for GPT-2 / Qwen. This
+avoids the double-BOS that naive `encode()` causes.
+
+### Multi-GPU / sharding
+
+When more than one CUDA device is visible, models load with `device_map="auto"`
+and shard across all of them automatically. Pin which GPUs with
+`CUDA_VISIBLE_DEVICES=0,1,...`. The server auto-selects `cuda` → `mps` → `cpu`.
+
+### Mock mode
+
+```bash
+MODEL_NAME=mock bash run.sh
+```
+
+Runs the whole site with a fake predictor and **no torch/transformers** — handy
+for developing the frontend.
