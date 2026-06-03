@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>no free will · the model predicts you</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>no free will</h1>
+    <p class="tagline">
+      Start typing. A language model is racing to guess your next token before
+      you commit it. Your words are tinted by how much you
+      <span class="legend green">surprised</span> /
+      <span class="legend red">bored</span> it.
+    </p>
+  </header>
+
+  <main>
+    <section class="editor-wrap">
+      <!-- backdrop renders colored tokens + the ghost prediction;
+           the textarea on top has transparent text but a visible caret. -->
+      <div id="backdrop" aria-hidden="true"><span id="highlights"></span><span id="ghost"></span></div>
+      <textarea id="input" spellcheck="false" autocomplete="off"
+                placeholder="The quick brown fox…"></textarea>
+    </section>
+
+    <aside class="panel">
+      <div class="stat">
+        <div class="stat-big"><span id="accuracy">—</span></div>
+        <div class="stat-label">of your tokens were the model's #1 guess</div>
+      </div>
+
+      <div class="status" id="status">connecting…</div>
+
+      <h2>Next token, predicted</h2>
+      <ol id="predictions" class="predictions"></ol>
+
+      <details class="settings">
+        <summary>settings</summary>
+        <label>show top
+          <input id="topk" type="number" min="1" max="40" value="10" /> guesses
+        </label>
+      </details>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

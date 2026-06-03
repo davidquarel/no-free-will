@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+# Required only for real model inference (not needed for MODEL_NAME=mock):
+torch>=2.1
+transformers>=4.40
