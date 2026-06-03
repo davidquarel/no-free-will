@@ -6,13 +6,16 @@ Run:
 
 Then open http://localhost:8000  (or point a browser at the host's IP).
 
+The page has a model dropdown (see MODELS below). Only one model is held in
+memory at a time: switching evicts the previous model first, so a 16GB GPU
+never has to hold two large models at once. Weights load in bf16/fp16 on CUDA.
+
 Set MODEL_NAME=mock to run without torch/transformers.
-The model is loaded lazily on the first WebSocket connection so the HTTP
-server (and a friendly error page) is available immediately.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -20,44 +23,67 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from predictors import build_predictor
+from predictors import build_predictor, free_predictor
 
 app = FastAPI(title="no-free-will")
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "gpt2")
+# Curated small base models. Sizes are bf16/fp16 weight footprints; all fit
+# comfortably alongside activations on a 16GB GPU. gpt2 is a tiny baseline and
+# "mock" needs no torch at all.
+MODELS = [
+    {"id": "gpt2", "label": "GPT-2 small · 124M (baseline)"},
+    {"id": "Qwen/Qwen3-0.6B-Base", "label": "Qwen3 0.6B base · ~1.4GB"},
+    {"id": "Qwen/Qwen3-1.7B-Base", "label": "Qwen3 1.7B base · ~3.8GB"},
+    {"id": "Qwen/Qwen3-4B-Base", "label": "Qwen3 4B base · ~8GB"},
+    {"id": "HuggingFaceTB/SmolLM2-1.7B", "label": "SmolLM2 1.7B base · ~3.8GB"},
+    {"id": "mock", "label": "Mock (no GPU — UI test)"},
+]
 
-_predictor = None
-_predictor_error: str | None = None
+DEFAULT_MODEL = os.environ.get("MODEL_NAME", "gpt2")
+
+# Make sure a custom MODEL_NAME is always selectable in the dropdown.
+if DEFAULT_MODEL not in {m["id"] for m in MODELS}:
+    MODELS.insert(0, {"id": DEFAULT_MODEL, "label": f"{DEFAULT_MODEL} (custom)"})
+
+ALLOWED = {m["id"] for m in MODELS}
 
 
-def get_predictor():
-    """Load the model once, lazily. Cache the error if it fails."""
-    global _predictor, _predictor_error
-    if _predictor is None and _predictor_error is None:
-        try:
-            _predictor = build_predictor(MODEL_NAME)
-        except Exception as exc:  # surface load failures to the client
-            _predictor_error = f"{type(exc).__name__}: {exc}"
-    return _predictor
+class ModelManager:
+    """Holds at most one loaded model. Loading runs in a worker thread (so the
+    event loop keeps serving other sockets) and is serialized by an async lock.
+    Switching models evicts the current one first to bound VRAM usage."""
+
+    def __init__(self) -> None:
+        self.predictor = None
+        self.current_name: str | None = None
+        self.lock = asyncio.Lock()
+
+    async def get(self, name: str):
+        async with self.lock:
+            if self.current_name == name and self.predictor is not None:
+                return self.predictor
+            if self.predictor is not None:
+                old, self.predictor, self.current_name = self.predictor, None, None
+                await asyncio.to_thread(free_predictor, old)
+            predictor = await asyncio.to_thread(build_predictor, name)
+            self.predictor, self.current_name = predictor, name
+            return predictor
+
+
+manager = ModelManager()
 
 
 @app.get("/api/config")
 def config():
-    return {"model": MODEL_NAME}
+    return {"models": MODELS, "default": DEFAULT_MODEL}
 
 
 @app.websocket("/ws")
 async def ws(socket: WebSocket):
     await socket.accept()
-    predictor = get_predictor()
-    if predictor is None:
-        await socket.send_text(
-            json.dumps({"error": f"Failed to load model '{MODEL_NAME}': {_predictor_error}"})
-        )
-        await socket.close()
-        return
-
-    await socket.send_text(json.dumps({"ready": True, "model": predictor.name}))
+    await socket.send_text(
+        json.dumps({"models": MODELS, "default": DEFAULT_MODEL})
+    )
 
     try:
         while True:
@@ -66,14 +92,33 @@ async def ws(socket: WebSocket):
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+
             text = msg.get("text", "")
             k = int(msg.get("k", 10))
             seq = msg.get("seq")  # echoed back so the client can drop stale results
-            try:
-                result = predictor.predict(text, k=k)
-            except Exception as exc:
-                await socket.send_text(json.dumps({"error": f"{type(exc).__name__}: {exc}", "seq": seq}))
+            requested = msg.get("model") or DEFAULT_MODEL
+
+            if requested not in ALLOWED:
+                await socket.send_text(
+                    json.dumps({"error": f"Unknown model '{requested}'", "seq": seq})
+                )
                 continue
+
+            # Tell the client we're (down)loading before the blocking work.
+            if manager.current_name != requested:
+                await socket.send_text(
+                    json.dumps({"status": "loading", "model": requested, "seq": seq})
+                )
+
+            try:
+                predictor = await manager.get(requested)
+                result = await asyncio.to_thread(predictor.predict, text, k)
+            except Exception as exc:
+                await socket.send_text(
+                    json.dumps({"error": f"{type(exc).__name__}: {exc}", "seq": seq})
+                )
+                continue
+
             result["seq"] = seq
             await socket.send_text(json.dumps(result))
     except WebSocketDisconnect:

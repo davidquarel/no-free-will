@@ -15,6 +15,7 @@ const predictionsEl = document.getElementById("predictions");
 const accuracyEl = document.getElementById("accuracy");
 const statusEl = document.getElementById("status");
 const topkInput = document.getElementById("topk");
+const modelSelect = document.getElementById("model");
 
 let seq = 0;          // monotonically increasing request id
 let lastRenderedSeq = -1;
@@ -113,9 +114,21 @@ function send() {
     JSON.stringify({
       text: input.value,
       k: Math.max(1, Math.min(40, parseInt(topkInput.value, 10) || 10)),
+      model: modelSelect.value,
       seq,
     })
   );
+}
+
+function populateModels(models, def) {
+  if (modelSelect.options.length) return; // only build once
+  for (const m of models) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.label;
+    if (m.id === def) opt.selected = true;
+    modelSelect.appendChild(opt);
+  }
 }
 
 let debounce = null;
@@ -148,17 +161,26 @@ function connect() {
       setStatus(data.error, "err");
       return;
     }
-    if (data.ready) {
-      setStatus(`model: ${data.model}`, "ok");
+    if (data.models) {
+      populateModels(data.models, data.default);
+      setStatus("connected", "ok");
       send(); // prime predictions for whatever is already in the box
+      return;
+    }
+    if (data.status === "loading") {
+      setStatus(`loading ${data.model}… (first load downloads weights)`, "");
       return;
     }
     // Drop out-of-order/stale responses.
     if (typeof data.seq === "number" && data.seq < lastRenderedSeq) return;
     lastRenderedSeq = data.seq ?? lastRenderedSeq;
+    setStatus(`model: ${data.model}`, "ok");
     renderResult(data);
   };
 }
+
+// Switching model: re-run on the current text immediately.
+modelSelect.addEventListener("change", send);
 
 input.addEventListener("input", onInput);
 input.addEventListener("scroll", syncScroll);

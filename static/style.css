@@ -112,6 +112,19 @@ main {
   top: 16px;
 }
 
+.model-picker { display: block; margin-bottom: 16px; }
+.model-picker span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
+#model {
+  width: 100%;
+  background: #0d1117;
+  color: var(--fg);
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 7px 8px;
+  font-size: 14px;
+  font-family: var(--mono);
+}
+
 .stat { text-align: center; padding-bottom: 12px; border-bottom: 1px solid #30363d; }
 .stat-big { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .stat-label { color: var(--muted); font-size: 13px; }

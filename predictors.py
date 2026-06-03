@@ -51,15 +51,26 @@ class HFPredictor(BasePredictor):
         self.torch = torch
         self.name = model_name
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
-        self.model.eval()
-
         self.device = (
             "cuda"
             if torch.cuda.is_available()
             else ("mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() else "cpu")
         )
+
+        # On GPU, load weights in half precision so multi-billion-param models
+        # fit in modest VRAM (a 4B model is ~16GB in fp32 but only ~8GB in
+        # bf16). Prefer bf16 where supported (Qwen3 is trained in bf16), else
+        # fp16. CPU stays fp32 for correctness/speed.
+        if self.device == "cuda":
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        else:
+            dtype = torch.float32
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=dtype, low_cpu_mem_usage=True
+        )
+        self.model.eval()
         self.model.to(self.device)
 
         # A token to prepend so position 0 has context. Fall back gracefully.
@@ -84,7 +95,9 @@ class HFPredictor(BasePredictor):
                 input_ids = [self.prefix_id if self.prefix_id is not None else 0]
 
             tensor = torch.tensor([input_ids], device=self.device)
-            logits = self.model(tensor).logits[0]  # (seq, vocab)
+            # Upcast logits to fp32 before softmax for stable probabilities
+            # even when the model runs in bf16/fp16.
+            logits = self.model(tensor).logits[0].float()  # (seq, vocab)
             logprobs = torch.log_softmax(logits, dim=-1)
 
             # --- top-k prediction for the NEXT token (from the last position) ---
@@ -149,6 +162,26 @@ class MockPredictor(BasePredictor):
             tokens.append({"text": t, "prob": prob, "rank": rank})
 
         return {"model": self.name, "predictions": predictions, "tokens": tokens}
+
+
+def free_predictor(predictor: "BasePredictor") -> None:
+    """Release a predictor's model and reclaim VRAM. Used before loading a
+    different model so we never hold two large models at once on a 16GB GPU."""
+    import gc
+
+    torch = getattr(predictor, "torch", None)
+    model = getattr(predictor, "model", None)
+    if model is not None:
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+    for attr in ("model", "tokenizer"):
+        if hasattr(predictor, attr):
+            setattr(predictor, attr, None)
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _mock_tokenize(text: str) -> list[str]:
