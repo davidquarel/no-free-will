@@ -52,7 +52,12 @@ MODELS = [
     {"id": "mock", "label": "Mock (no GPU — UI test)"},
 ]
 
-DEFAULT_MODEL = os.environ.get("MODEL_NAME", "Qwen/Qwen3-4B-Base")
+DEFAULT_MODEL = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B")
+
+# Light gate on model switching (changing the model affects everyone). Not meant
+# to be strong — just enough to stop casual visitors flipping the model. Set a
+# real one via ADMIN_PASSWORD; defaults to "banana".
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "banana")
 
 # Make sure a custom MODEL_NAME is always selectable in the dropdown.
 if DEFAULT_MODEL not in {m["id"] for m in MODELS}:
@@ -193,8 +198,20 @@ async def ws(socket: WebSocket):
             except json.JSONDecodeError:
                 continue
 
-            # --- explicit global model switch: changes the model for EVERYONE ---
+            # --- admin: verify the password so the client can unlock the panel ---
+            if "admin_check" in msg:
+                await socket.send_text(
+                    json.dumps({"admin_ok": msg.get("admin_check") == ADMIN_PASSWORD})
+                )
+                continue
+
+            # --- explicit global model switch: admin-only, changes EVERYONE ---
             if "set_model" in msg:
+                if msg.get("password") != ADMIN_PASSWORD:
+                    await socket.send_text(
+                        json.dumps({"error": "Wrong admin password — unlock the admin panel to switch models."})
+                    )
+                    continue
                 name = msg.get("set_model")
                 if name not in ALLOWED:
                     await socket.send_text(json.dumps({"error": f"Unknown model '{name}'"}))

@@ -27,15 +27,25 @@
     </section>
 
     <aside class="panel">
-      <label class="model-picker">
+      <div class="model-current">
         <span>model</span>
-        <select id="model"></select>
-      </label>
-      <p class="model-warning">
-        ⚠ One model is loaded for everyone at once — switching it changes the
-        model for <strong>all connected users</strong>. This keeps VRAM low and
-        lets everyone's requests share a single batched forward pass.
-      </p>
+        <strong id="modelnow">…</strong>
+      </div>
+      <details class="admin">
+        <summary>🔒 admin · switch model</summary>
+        <div class="admin-body">
+          <div class="admin-row">
+            <input type="password" id="adminpass" placeholder="password" autocomplete="off" />
+            <button type="button" id="adminunlock">unlock</button>
+          </div>
+          <div class="admin-status" id="adminstatus">locked</div>
+          <select id="model" disabled></select>
+          <p class="model-warning">
+            ⚠ Switching changes the model for <strong>all connected users</strong>
+            (one model in VRAM, shared + batched).
+          </p>
+        </div>
+      </details>
 
       <div class="stat">
         <div class="stat-big"><span id="accuracy">—</span></div>

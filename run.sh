@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # Serve the app. Run setup.sh once first to install dependencies.
-# Defaults to Qwen3-4B-Base in FULL bf16 (~8GB) — strong and unquantized, so no
-# quantization "brain damage". Bigger models (8B/14B) auto-load in 4-bit since
-# that's the only way they fit 16GB; pick them from the in-page dropdown.
+# Defaults to Qwen2.5-7B in FULL bf16 (~14GB) — strong and unquantized. Bigger
+# models (8B 8-bit, 14B 4-bit) auto-quantize since that's the only way they fit
+# 16GB; switch models from the in-page admin panel (password "banana").
 #
 #   bash run.sh                 # serve on port 8080
 #   bash run.sh --port 9000     # serve on a different port
@@ -16,7 +16,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B-Base}"
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-7B}"
 QUANTIZE="${QUANTIZE-}"        # empty = per-model default (bf16 ≤4B, 4-bit for 8B/14B)
 PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"

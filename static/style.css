@@ -118,6 +118,42 @@ main {
   top: 16px;
 }
 
+/* current model (read-only) + password-gated admin panel */
+.model-current {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.model-current span {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+}
+.model-current strong { font-family: var(--mono); font-size: 13px; text-align: right; }
+.admin {
+  margin-bottom: 16px;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #0d1117;
+}
+.admin > summary { cursor: pointer; font-size: 12px; color: var(--muted); user-select: none; }
+.admin-body { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.admin-row { display: flex; gap: 6px; }
+.admin-row input {
+  flex: 1; min-width: 0;
+  background: #0d1117; color: var(--fg);
+  border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; font-size: 13px;
+}
+.admin-row button {
+  background: #21262d; color: var(--fg);
+  border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px;
+}
+.admin-row button:hover { background: #30363d; }
+.admin-status { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.admin-status.ok { color: #56d364; }
+.admin-status.err { color: #f85149; }
+#model[disabled] { opacity: 0.5; cursor: not-allowed; }
 .model-picker { display: block; margin-bottom: 8px; }
 .model-warning {
   margin: 0 0 16px;

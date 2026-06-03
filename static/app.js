@@ -16,11 +16,17 @@ const accuracyEl = document.getElementById("accuracy");
 const statusEl = document.getElementById("status");
 const topkInput = document.getElementById("topk");
 const modelSelect = document.getElementById("model");
+const modelNow = document.getElementById("modelnow");
+const adminPass = document.getElementById("adminpass");
+const adminUnlock = document.getElementById("adminunlock");
+const adminStatus = document.getElementById("adminstatus");
 
 let seq = 0;          // monotonically increasing request id
 let lastRenderedSeq = -1;
 let socket = null;
 let lastTokens = [];  // last server-confirmed token render, reused while typing
+let currentModel = null;   // the globally-loaded model
+let adminPassword = null;  // set once the admin password is verified
 
 function escapeHtml(s) {
   return s
@@ -154,9 +160,16 @@ function send() {
 }
 
 // Changing the dropdown switches the model for EVERYONE (one model in VRAM).
+// Gated by the admin password, which the server verifies.
 function requestModel(name) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({ set_model: name }));
+  socket.send(JSON.stringify({ set_model: name, password: adminPassword }));
+}
+
+function setCurrentModel(name) {
+  currentModel = name;
+  if (modelNow) modelNow.textContent = name;
+  if (modelSelect) modelSelect.value = name;
 }
 
 function populateModels(models, current) {
@@ -198,17 +211,33 @@ function connect() {
     const data = JSON.parse(ev.data);
     if (data.error) {
       setStatus(data.error, "err");
+      if (currentModel) modelSelect.value = currentModel; // undo a rejected switch
       return;
     }
     if (data.models) {
       populateModels(data.models, data.current || data.default);
+      setCurrentModel(data.current || data.default);
       setStatus("connected", "ok");
       send(); // prime predictions for whatever is already in the box
       return;
     }
+    if (typeof data.admin_ok === "boolean") {
+      if (data.admin_ok) {
+        adminPassword = adminPass.value;
+        modelSelect.disabled = false;
+        adminStatus.textContent = "unlocked — you can switch the model";
+        adminStatus.className = "admin-status ok";
+      } else {
+        adminPassword = null;
+        modelSelect.disabled = true;
+        adminStatus.textContent = "wrong password";
+        adminStatus.className = "admin-status err";
+      }
+      return;
+    }
     if (data.model_switched) {
       // Someone (maybe another user) switched the global model — sync up.
-      modelSelect.value = data.model_switched;
+      setCurrentModel(data.model_switched);
       setStatus(`model: ${data.model_switched}`, "ok");
       send();
       return;
@@ -227,6 +256,16 @@ function connect() {
 
 // Switching model changes it for every connected user (one model in VRAM).
 modelSelect.addEventListener("change", () => requestModel(modelSelect.value));
+
+// Admin unlock: verify the password with the server, then enable the dropdown.
+function tryUnlock() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ admin_check: adminPass.value }));
+}
+adminUnlock.addEventListener("click", tryUnlock);
+adminPass.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") tryUnlock();
+});
 
 input.addEventListener("input", onInput);
 input.addEventListener("scroll", syncScroll);
