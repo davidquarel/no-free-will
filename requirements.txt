@@ -3,4 +3,5 @@ uvicorn[standard]>=0.29
 # Required only for real model inference (not needed for MODEL_NAME=mock):
 torch>=2.1
 transformers>=4.51   # Qwen3 architecture support
-accelerate>=0.26     # efficient/low-memory weight loading
+accelerate>=0.26     # efficient/low-memory weight loading + GPU sharding
+bitsandbytes>=0.43   # 4-bit/8-bit quantization (CUDA, Linux) for QUANTIZE=4bit

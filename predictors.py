@@ -68,20 +68,44 @@ class HFPredictor(BasePredictor):
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        # Shard across all visible GPUs when there's more than one (e.g. a
-        # 14B model across 4xA4000). accelerate's device_map="auto" splits the
-        # layers and moves activations between cards automatically; inputs go
-        # to cuda:0. With a single GPU we just .to() it; CPU/MPS likewise.
+        # Optional bitsandbytes quantization (CUDA only), set via QUANTIZE=
+        # "4bit" or "8bit". 4-bit NF4 lets a 14B model run in ~9GB so it fits a
+        # single 16GB card while keeping most of its quality.
+        quant = os.environ.get("QUANTIZE", "").lower().replace("-", "")
+        quant_config = None
+        if self.device == "cuda" and quant in ("4bit", "4", "nf4"):
+            from transformers import BitsAndBytesConfig
+
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=dtype,
+                bnb_4bit_use_double_quant=True,
+            )
+        elif self.device == "cuda" and quant in ("8bit", "8"):
+            from transformers import BitsAndBytesConfig
+
+            quant_config = BitsAndBytesConfig(load_in_8bit=True)
+
+        common = dict(torch_dtype=dtype, low_cpu_mem_usage=True)
         n_gpus = torch.cuda.device_count() if self.device == "cuda" else 0
-        if n_gpus > 1:
+
+        if quant_config is not None:
+            # Quantized weights are placed by accelerate and can't be .to()'d.
             self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=dtype, low_cpu_mem_usage=True, device_map="auto"
+                model_name, quantization_config=quant_config, device_map="auto", **common
+            )
+            self.input_device = "cuda:0"
+        elif n_gpus > 1:
+            # Shard across all visible GPUs (e.g. a 14B model across 4xA4000).
+            # device_map="auto" splits layers and moves activations between
+            # cards automatically; inputs go to cuda:0.
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, device_map="auto", **common
             )
             self.input_device = "cuda:0"
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=dtype, low_cpu_mem_usage=True
-            ).to(self.device)
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, **common).to(self.device)
             self.input_device = self.device
         self.model.eval()
 

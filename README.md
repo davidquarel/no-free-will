@@ -12,18 +12,43 @@ next token **before you commit it**. As you type:
 Default model is **gpt2** (a.k.a. gpt2-small), but any HuggingFace causal LM
 works — just set `MODEL_NAME`.
 
-## Run it
+## Quick start
+
+After cloning, one command installs everything (via `uv`) and serves the app:
+
+```bash
+bash run.sh
+```
+
+This defaults to **Qwen3-14B-Base in 4-bit**, which fits a single 16GB GPU
+(~9GB) while keeping ~Qwen2.5-32B-Base quality. First run downloads the weights
+from HuggingFace. Then open <http://localhost:8000>.
+
+Override via env vars:
+
+```bash
+PORT=8080 bash run.sh                                  # different port
+MODEL_NAME=Qwen/Qwen3-8B-Base bash run.sh              # different model (still 4-bit)
+QUANTIZE= MODEL_NAME=Qwen/Qwen3-4B-Base bash run.sh    # no quantization (fits bf16)
+TUNNEL=1 bash run.sh                                   # also print a public cloudflared URL
+```
+
+### Manual run
 
 ```bash
 pip install -r requirements.txt
-
-# default: gpt2-small on GPU if available, else CPU
-MODEL_NAME=gpt2 uvicorn server:app --host 0.0.0.0 --port 8000
+MODEL_NAME=Qwen/Qwen3-14B-Base QUANTIZE=4bit uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-Open <http://localhost:8000>. To let other people visit, run it on your
-GPU box and point them at that machine's address (or front it with a reverse
-proxy / tunnel — see below).
+To let other people visit, run it on your GPU box and point them at that
+machine's address (or front it with a tunnel — see below).
+
+### Quantization (fit big models on small GPUs)
+
+`QUANTIZE=4bit` (NF4 via bitsandbytes) roughly quarters the weight footprint, so
+a 14B model runs in ~9GB instead of ~28GB. `QUANTIZE=8bit` halves it. Leave
+`QUANTIZE` empty to load full bf16. Quantization is CUDA-only and applies to
+whichever model is selected.
 
 ### Choosing a model
 
