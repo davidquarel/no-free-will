@@ -27,14 +27,19 @@ from predictors import build_predictor, free_predictor
 
 app = FastAPI(title="no-free-will")
 
-# Curated small base models. Sizes are bf16/fp16 weight footprints; all fit
-# comfortably alongside activations on a 16GB GPU. gpt2 is a tiny baseline and
-# "mock" needs no torch at all.
+# Curated base (pretrained, non-instruct) models for next-token prediction.
+# Sizes are bf16 weight footprints. On a multi-GPU box these shard across all
+# cards automatically (device_map="auto"), so the larger ones fit a 4xA4000
+# (~64GB total). Qwen3-14B-Base is the recommended "strong but reliable" pick:
+# Qwen reports it matches Qwen2.5-32B-Base while leaving plenty of headroom.
 MODELS = [
     {"id": "gpt2", "label": "GPT-2 small · 124M (baseline)"},
     {"id": "Qwen/Qwen3-0.6B-Base", "label": "Qwen3 0.6B base · ~1.4GB"},
     {"id": "Qwen/Qwen3-1.7B-Base", "label": "Qwen3 1.7B base · ~3.8GB"},
     {"id": "Qwen/Qwen3-4B-Base", "label": "Qwen3 4B base · ~8GB"},
+    {"id": "Qwen/Qwen3-8B-Base", "label": "Qwen3 8B base · ~16GB"},
+    {"id": "Qwen/Qwen3-14B-Base", "label": "Qwen3 14B base · ~28GB (recommended)"},
+    {"id": "Qwen/Qwen3-30B-A3B-Base", "label": "Qwen3 30B-A3B MoE base · ~61GB (tight)"},
     {"id": "HuggingFaceTB/SmolLM2-1.7B", "label": "SmolLM2 1.7B base · ~3.8GB"},
     {"id": "mock", "label": "Mock (no GPU — UI test)"},
 ]

@@ -25,18 +25,41 @@ Open <http://localhost:8000>. To let other people visit, run it on your
 GPU box and point them at that machine's address (or front it with a reverse
 proxy / tunnel — see below).
 
-### Any model
+### Choosing a model
 
-`MODEL_NAME` accepts any HuggingFace causal LM id:
+There's a **dropdown in the page** to switch models live (it changes the model
+for everyone — only one model is held in memory at a time, and switching evicts
+the previous one). The curated list is base/pretrained models suited to
+next-token prediction. **Qwen3-14B-Base** is the recommended strong pick:
+Qwen reports it matching Qwen2.5-32B-Base quality, and at ~28GB (bf16) it shards
+comfortably across a 4xA4000 box.
+
+`MODEL_NAME` sets the default and may be any HuggingFace causal LM id (custom
+ids are added to the dropdown automatically):
 
 ```bash
-MODEL_NAME=gpt2-large            uvicorn server:app --port 8000
-MODEL_NAME=EleutherAI/gpt-neo-1.3B uvicorn server:app --port 8000
-MODEL_NAME=mistralai/Mistral-7B-v0.1 uvicorn server:app --port 8000
+MODEL_NAME=Qwen/Qwen3-14B-Base uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-Larger models give sharper predictions but need more VRAM and add latency per
-keystroke. The server auto-selects `cuda` → `mps` → `cpu`.
+### Multi-GPU / sharding
+
+When more than one CUDA device is visible, models load with
+`device_map="auto"` and shard across all of them automatically — no flags
+needed. So on 4xA4000 (~64GB total) a 14B model just works; inputs go to
+`cuda:0` and activations hop between cards.
+
+Weights load in **bf16** (or fp16 if bf16 is unsupported), so a 14B model is
+~28GB rather than ~56GB. The server auto-selects `cuda` → `mps` → `cpu`.
+
+To pin which GPUs are used: `CUDA_VISIBLE_DEVICES=0,1,2,3 uvicorn ...`.
+
+### Beginning-of-sequence handling
+
+Text is encoded **without** the tokenizer's automatic special tokens, then
+exactly one start token is prepended so the first typed token has the context
+the model expects: a model's real BOS where it has one (Llama/SmolLM style), or
+`<|endoftext|>` (the pretraining document separator) for GPT-2 / Qwen, which
+have no dedicated BOS. This avoids the double-BOS that naive `encode()` causes.
 
 ### No GPU / no torch? Mock mode
 

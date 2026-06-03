@@ -67,13 +67,33 @@ class HFPredictor(BasePredictor):
             dtype = torch.float32
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=dtype, low_cpu_mem_usage=True
-        )
-        self.model.eval()
-        self.model.to(self.device)
 
-        # A token to prepend so position 0 has context. Fall back gracefully.
+        # Shard across all visible GPUs when there's more than one (e.g. a
+        # 14B model across 4xA4000). accelerate's device_map="auto" splits the
+        # layers and moves activations between cards automatically; inputs go
+        # to cuda:0. With a single GPU we just .to() it; CPU/MPS likewise.
+        n_gpus = torch.cuda.device_count() if self.device == "cuda" else 0
+        if n_gpus > 1:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype, low_cpu_mem_usage=True, device_map="auto"
+            )
+            self.input_device = "cuda:0"
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype, low_cpu_mem_usage=True
+            ).to(self.device)
+            self.input_device = self.device
+        self.model.eval()
+
+        # Beginning-of-sequence handling. We encode content WITHOUT the
+        # tokenizer's automatic specials (add_special_tokens=False) and then
+        # prepend exactly one start token ourselves, so the first typed token
+        # always has the context the model was pretrained to expect:
+        #   * Llama/SmolLM-style models -> their real BOS token.
+        #   * GPT-2 / Qwen (no dedicated BOS) -> <|endoftext|>, the document
+        #     separator used during pretraining, which acts as "start of doc".
+        # This also avoids the double-BOS bug you'd get from letting encode()
+        # add a BOS and then prepending another.
         self.prefix_id = self.tokenizer.bos_token_id
         if self.prefix_id is None:
             self.prefix_id = self.tokenizer.eos_token_id
@@ -88,13 +108,13 @@ class HFPredictor(BasePredictor):
     def predict(self, text: str, k: int = 10) -> dict[str, Any]:
         torch = self.torch
         with self._lock, torch.no_grad():
-            ids = self.tokenizer.encode(text)
+            ids = self.tokenizer.encode(text, add_special_tokens=False)
             input_ids = ([self.prefix_id] if self.prefix_id is not None else []) + ids
             # Need at least one token to get a "next token" distribution.
             if not input_ids:
                 input_ids = [self.prefix_id if self.prefix_id is not None else 0]
 
-            tensor = torch.tensor([input_ids], device=self.device)
+            tensor = torch.tensor([input_ids], device=self.input_device)
             # Upcast logits to fp32 before softmax for stable probabilities
             # even when the model runs in bf16/fp16.
             logits = self.model(tensor).logits[0].float()  # (seq, vocab)
