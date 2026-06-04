@@ -126,6 +126,24 @@ two ways: a `@app.middleware` sets `Cache-Control: no-cache, must-revalidate` on
 `/`+`.html`/`.js`/`.css`, and `index.html` carries `?v=N` query strings on its
 asset URLs (bump N to bypass a copy already stuck in the edge cache).
 
+## Memory: vocab-chunked head (CHUNK_VOCAB, opt-in)
+`predictors.py` has an optional "online softmax" scoring path (`_score_chunked`)
+that streams the LM head over the vocab in `CHUNK_VOCAB`-wide slices so the full
+`(B,S,vocab)` logits are never materialized — the big VRAM driver on Gemma's 262k
+vocab. Off by default (`CHUNK_VOCAB=0`); set e.g. `CHUNK_VOCAB=8192` to enable.
+It gets `last_hidden_state` from `_decoder()` and applies the tied head itself
+(with Gemma's `final_logit_softcapping`), keeping running max/Z (probs), a `>`
+count (ranks), and a running top-K (next token). Falls back to the full path if it
+errors. Measured on the A4000/16GB with gemma-4-12B 8-bit:
+- Full path ceiling: `B×S ≤ 2048`. Chunked: `B×S ≤ 4096` for `S≤1024` (≈2× more
+  concurrent short-text users). For `S≥2048` the bottleneck shifts to the decoder's
+  O(S²) attention, so chunking doesn't extend long-sequence limits.
+- Cost: ~2× latency under big batches (32-slice Python loop + fp32 elementwise);
+  negligible for typical short single-user inputs. Bigger `CHUNK_VOCAB` = fewer
+  slices = faster but more per-slice memory.
+- Correctness: probs match the full path to ~1e-6 in fp32; in bf16/int8 the top-k
+  ordering matches except occasional tail near-tie swaps (acceptable/approximate).
+
 ## Git workflow (REQUIRED)
 For every new feature/change like the ones in this project, do NOT commit straight
 to `main`. Create a **new branch**, commit the work there, and **push the branch**.

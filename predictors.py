@@ -146,6 +146,34 @@ class HFPredictor(BasePredictor):
         # Inference is not thread-safe across requests; serialize it.
         self._lock = threading.Lock()
 
+        # Optional: score via a vocab-chunked "online softmax" head instead of
+        # materializing the full (B, S, vocab) logits. CHUNK_VOCAB = chunk width
+        # in vocab columns (0 = off, use the plain full-logits path). This is the
+        # big memory win on large-vocab models (Gemma's vocab is 262k).
+        self.chunk_vocab = int(os.environ.get("CHUNK_VOCAB", "0") or 0)
+
+        # Gemma applies final-logit softcapping (30·tanh(x/30)); it's monotonic so
+        # it doesn't change ranks, but it DOES change probabilities, so the chunked
+        # head must apply it per chunk to match the model's own logits.
+        cfg = getattr(self.model, "config", None)
+        sc = getattr(cfg, "final_logit_softcapping", None)
+        if sc is None and hasattr(cfg, "text_config"):
+            sc = getattr(cfg.text_config, "final_logit_softcapping", None)
+        self._softcap = float(sc) if sc else None
+
+    def _decoder(self):
+        """The base model that returns last_hidden_state WITHOUT applying the
+        (full-vocab) LM head — so the chunked path can apply the head itself."""
+        m = self.model
+        if hasattr(m, "get_decoder"):
+            try:
+                d = m.get_decoder()
+                if d is not None:
+                    return d
+            except Exception:
+                pass
+        return getattr(m, "model", None) or getattr(m, "transformer", None) or m
+
     def _decode(self, token_id: int) -> str:
         # Decode a single id so leading spaces ("Ġ") render naturally.
         return self.tokenizer.decode([token_id])
@@ -200,6 +228,22 @@ class HFPredictor(BasePredictor):
             # Correct 0-based positions for each (left-padded) row.
             position_ids = (attn.long().cumsum(-1) - 1).clamp(min=0)
 
+            offset = 1 if self.prefix_id is not None else 0
+
+            # Memory-frugal path: stream the vocab through the head in chunks so the
+            # full (B, S, vocab) logits never exist (see _score_chunked). If it
+            # fails on some model (no usable decoder / output embeddings), disable
+            # it and fall through to the plain full-logits path.
+            if self.chunk_vocab:
+                try:
+                    return self._score_chunked(
+                        input_ids, attn, position_ids, seqs, reqs, max_tokens, S, offset
+                    )
+                except Exception as exc:
+                    print(f"[chunked head failed ({type(exc).__name__}: {exc}); "
+                          f"falling back to full logits]", flush=True)
+                    self.chunk_vocab = 0
+
             # Keep the (B, S, vocab) logits in the model's dtype — upcasting the
             # whole tensor to fp32 would cost gigabytes for a 150k vocab and is
             # what tips a 7B/8B model over 16GB. log_softmax is per-row, so we
@@ -207,8 +251,6 @@ class HFPredictor(BasePredictor):
             logits = self.model(
                 input_ids=input_ids, attention_mask=attn, position_ids=position_ids
             ).logits  # (B, S, vocab), model dtype
-
-            offset = 1 if self.prefix_id is not None else 0
             out = []
             for b, (full, ids, total) in enumerate(seqs):
                 k = reqs[b][1]
@@ -249,6 +291,115 @@ class HFPredictor(BasePredictor):
                     "max_tokens": max_tokens,
                 })
             return out
+
+    def _score_chunked(self, input_ids, attn, position_ids, seqs, reqs, max_tokens, S, offset):
+        """Same outputs as predict_batch's full path, but the (B, S, vocab) logits
+        are NEVER materialized. We get last_hidden_state from the decoder, then
+        stream the tied LM head over the vocab in CHUNK_VOCAB-wide slices, keeping
+        only small running reductions per position:
+
+          * online softmax (running max M + denominator Z) for probabilities,
+          * a running count `rank` of vocab logits beating each typed token,
+          * a running top-K for the final position (the next-token prediction).
+
+        Peak transient drops from O(B·S·vocab) to O(B·S·chunk). The target token's
+        logit is obtained cheaply by gathering just its embedding row, so the whole
+        thing is a single pass over the head."""
+        torch = self.torch
+        dev = self.input_device
+        chunk = int(self.chunk_vocab)
+        B = len(seqs)
+        sc = self._softcap
+
+        # Hidden states without the full-vocab head.
+        dout = self._decoder()(
+            input_ids=input_ids, attention_mask=attn, position_ids=position_ids
+        )
+        hidden = getattr(dout, "last_hidden_state", None)
+        if hidden is None:
+            hidden = dout[0]                      # (B, S, H), model dtype
+        hf = hidden.float()
+        W = self.model.get_output_embeddings().weight  # (V, H), tied embedding
+        V = W.shape[0]
+
+        # What token does each position predict? (-1 = nothing to score here.)
+        target_id = torch.full((B, S), -1, dtype=torch.long)
+        for b, (full, _ids, _total) in enumerate(seqs):
+            Lf = len(full)
+            pad_b = S - Lf
+            for lp in range(Lf - 1):
+                target_id[b, pad_b + lp] = full[lp + 1]
+        target_id = target_id.to(dev)
+        tgt = target_id.clamp(min=0)
+        # Target logit = hidden · (its embedding row); softcapped to match the head.
+        target_logit = (hf * W[tgt].float()).sum(-1)  # (B, S) fp32
+        if sc:
+            target_logit = sc * torch.tanh(target_logit / sc)
+
+        K = max(min(k, V) for (_t, k) in reqs)
+        neg = float("-inf")
+        M = torch.full((B, S), neg, dtype=torch.float32, device=dev)
+        Z = torch.zeros((B, S), dtype=torch.float32, device=dev)
+        rank = torch.zeros((B, S), dtype=torch.float32, device=dev)
+        topk_vals = torch.full((B, K), neg, dtype=torch.float32, device=dev)
+        topk_idx = torch.full((B, K), -1, dtype=torch.long, device=dev)
+
+        for a in range(0, V, chunk):
+            Wc = W[a:a + chunk]                                  # (c, H)
+            lc = torch.matmul(hidden, Wc.t().to(hidden.dtype)).float()  # (B, S, c)
+            if sc:
+                lc = sc * torch.tanh(lc / sc)
+            # online softmax (rescale the running denominator to the new max)
+            cmax = lc.max(dim=-1).values                         # (B, S)
+            new_M = torch.maximum(M, cmax)
+            Z = Z * torch.exp(M - new_M) + torch.exp(lc - new_M.unsqueeze(-1)).sum(-1)
+            M = new_M
+            # rank = how many vocab logits beat the typed token's logit
+            rank += (lc > target_logit.unsqueeze(-1)).sum(-1).float()
+            # running top-K for the final (next-token) position only
+            last_c = lc[:, -1, :]
+            cv, ci = torch.topk(last_c, min(K, last_c.shape[-1]), dim=-1)
+            merged_v = torch.cat([topk_vals, cv], dim=-1)
+            merged_i = torch.cat([topk_idx, ci + a], dim=-1)
+            topk_vals, sel = torch.topk(merged_v, K, dim=-1)
+            topk_idx = torch.gather(merged_i, 1, sel)
+            del lc, cv, ci, merged_v, merged_i
+
+        prob_t = (torch.exp(target_logit - M) / Z).cpu()          # (B, S)
+        rank_c = rank.to(torch.long).cpu()
+        topk_prob = (torch.exp(topk_vals - M[:, -1:]) / Z[:, -1:]).cpu()
+        topk_idx_c = topk_idx.cpu()
+
+        out = []
+        for b, (full, ids, total) in enumerate(seqs):
+            k = reqs[b][1]
+            pad_b = S - len(full)
+            predictions = [
+                {"token": self._decode(int(topk_idx_c[b, j])), "prob": float(topk_prob[b, j])}
+                for j in range(min(k, K))
+                if int(topk_idx_c[b, j]) >= 0
+            ]
+            tokens = []
+            for i, tid in enumerate(ids):
+                j = offset + i - 1
+                if j < 0:
+                    tokens.append({"text": self._decode(tid), "prob": None, "rank": None})
+                    continue
+                pos = pad_b + j
+                tokens.append({
+                    "text": self._decode(tid),
+                    "prob": float(prob_t[b, pos]),
+                    "rank": int(rank_c[b, pos]),
+                })
+            out.append({
+                "model": self.name,
+                "predictions": predictions,
+                "tokens": tokens,
+                "n_tokens": len(ids),
+                "n_tokens_total": total,
+                "max_tokens": max_tokens,
+            })
+        return out
 
 
 class MockPredictor(BasePredictor):

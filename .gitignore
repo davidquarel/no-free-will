@@ -17,3 +17,4 @@ sessions/
 banned_clients.txt
 # generated admin password (when ADMIN_PASSWORD env is unset)
 admin_password.txt
+.claude/scheduled_tasks.lock
