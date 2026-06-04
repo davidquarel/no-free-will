@@ -14,7 +14,8 @@ next token **before you commit it**. As you type:
 
 Everyone shares **one model at a time** (kept in VRAM), and concurrent typists
 are **batched into a single forward pass**. The default model is
-**Qwen2.5-7B** in full bf16.
+**Gemma 4 12B (base)**, loaded **8-bit** (near-lossless, ~13 GB) so it fits a
+16 GB card.
 
 There's also a **live feed** at `/viewer.html` showing every connected person's
 typing in real time, with a country flag and their live score.
@@ -41,9 +42,19 @@ MODEL_NAME=mock bash run.sh                  # UI only, no torch/GPU
 
 ### Manual run
 
+The app runs from its **own** `.venv` (isolated so its newer `transformers`
+doesn't disturb any conda env). `setup.sh` builds it; then:
+
 ```bash
-pip install -r requirements.txt
-MODEL_NAME=Qwen/Qwen2.5-7B uvicorn server:app --host 0.0.0.0 --port 8080
+MODEL_NAME=google/gemma-4-12B ./.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8080
+```
+
+There's also a CLI smoke-test — load any model + check it predicts before wiring
+it into the server:
+
+```bash
+./.venv/bin/python testbed.py --model google/gemma-4-12B --quant 8bit "some text"
+./.venv/bin/python testbed.py --list
 ```
 
 ## Models & quantization
@@ -56,8 +67,9 @@ base/pretrained models, sized for a single **16 GB** GPU:
 | Model | How it loads on 16 GB |
 |-------|-----------------------|
 | GPT-2 small · Qwen3 0.6B/1.7B/4B · MiniCPM5-1B | full **bf16** |
-| Qwen2.5-7B, Falcon3-7B (**default-class**) | full **bf16** (~14 GB) |
+| Qwen2.5-7B, Falcon3-7B | full **bf16** (~14 GB) |
 | Qwen3-8B, Llama-3.1-8B | **8-bit** (near-lossless) |
+| **Gemma 4 12B** (base, multimodal · **default**) | **8-bit** (~13 GB) |
 | Qwen3-14B | **4-bit** (only thing that needs it) |
 
 Quantization is chosen **per model** automatically (small → bf16, 8B → 8-bit,
@@ -67,8 +79,10 @@ only); leave it empty for per-model defaults. `MODEL_NAME` sets the startup
 model and may be any HuggingFace causal LM id (custom ids join the dropdown).
 
 > Llama-3.1-8B is **gated** — needs an accepted license and a `HF_TOKEN`.
-> `gemma-4-E4B` is listed but **experimental** (it's a multimodal
-> `*ForConditionalGeneration`, so it may not load via the causal-LM path).
+> `google/gemma-4-12B` is a multimodal `*ForConditionalGeneration`, but
+> transformers maps it under `AutoModelForCausalLM`, so the text-only path works.
+> It needs **transformers ≥ 5.10**, which is why this project ships its own
+> isolated `.venv` (see below) rather than relying on a system/conda env.
 
 ## Admin panel
 
@@ -85,8 +99,14 @@ ADMIN_PASSWORD='whatever' bash run.sh
 Unlock the **🔒 admin** panel in the side bar to:
 
 - **switch the model** (affects everyone);
-- **adjust the token cap** — `MAX_TOKENS` (default **8192**) bounds VRAM by
+- **adjust the token cap** — `MAX_TOKENS` (default **1024**) bounds VRAM by
   truncating each request; the status shows `current / max tok (truncated)`.
+- **enable/disable the live conversation viewer** — a checkbox that turns the
+  `/viewer.html` feed on or off for everyone. When off, the server stops
+  streaming any conversation text to the feed (enforced server-side, not just
+  hidden) and the viewer page shows an "off" notice; admin unlock / ban
+  management on the viewer page still work. Default is on; override the startup
+  default with `VIEWER_ENABLED=0`.
 
 ## Live conversations (`/viewer.html`)
 
@@ -111,8 +131,10 @@ startup. Nothing is archived, and the text appears in no logs.
 Below the editor are two live terminals:
 
 - **server log** — streams `app.log` (model download/load progress included);
-- **GPU** — an nvtop-style readout via `gpustat` (util / mem / temp + processes),
-  refreshing each second.
+- **GPU** — a compact live readout: the server streams a small `gpustat`/NVML
+  JSON snapshot each second (`/gpu`), and the page draws one info line per GPU
+  plus horizontal ASCII bars for **MEM** and current **Util%**, and a fixed
+  32-bar ASCII sparkline of utilisation over time.
 
 A pill in the header shows whether you're running the latest code: **green** =
 up to date, **yellow** = a static change needs a page reload *or* a backend
@@ -143,9 +165,13 @@ comfortably. Tune with `MAX_BATCH` (default 8) and `BATCH_WINDOW_MS` (default 8)
   hit fp32 — that's what lets a 7B run in bf16 on 16 GB). A `MockPredictor`
   mirrors the interface with zero heavy deps.
 - **`server.py`** — FastAPI app. A `BatchEngine` coalesces concurrent `/ws`
-  requests; a `ModelManager` holds the one global model and serializes swaps.
-  Also serves `/logs`, `/gpu`, `/sessions` (the viewer feed), `/api/config`,
-  and `/api/version`.
+  requests *across users*; a `ModelManager` holds the one global model and
+  serializes swaps. Each `/ws` connection is a **reader + worker** pair: the
+  reader streams every keystroke to the viewer but only keeps the *latest*
+  prediction request, and the worker runs the model on the newest text — so
+  typing faster than the GPU **skips the stale intermediate prefixes** instead of
+  running a forward pass per keystroke. Also serves `/logs`, `/gpu`, `/sessions`
+  (the viewer feed), `/api/config`, and `/api/version`.
 - **`static/`** — a transparent `<textarea>` over a styled backdrop that renders
   surprisal-colored token chips + the ghost prediction. While you type, the
   already-scored prefix keeps its colors and only the new tail is plain, so the

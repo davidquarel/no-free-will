@@ -74,12 +74,16 @@
       <ul id="bans"></ul>
     </div>
   </header>
-  <main id="grid"><div class="none" id="none">No one is connected right now.</div></main>
+  <main id="grid">
+    <div class="none" id="disabled" hidden>The live conversation viewer has been turned off by an admin.</div>
+    <div class="none" id="none">No one is connected right now.</div>
+  </main>
 
   <script>
     const grid = document.getElementById("grid");
     const countEl = document.getElementById("count");
     const noneEl = document.getElementById("none");
+    const disabledEl = document.getElementById("disabled");
     const pwEl = document.getElementById("pw");
     const unlockEl = document.getElementById("unlock");
     const aStatus = document.getElementById("astatus");
@@ -90,11 +94,14 @@
     let sock = null;
     let adminPw = null;     // verified admin password
     let unlocked = false;
+    let viewerEnabled = true;  // admin can turn the whole live feed off
 
     function refresh() {
       const n = Object.keys(panels).length;
       countEl.textContent = n;
-      noneEl.style.display = n ? "none" : "";
+      disabledEl.hidden = viewerEnabled;
+      // "no one connected" only when the feed is on and genuinely empty
+      noneEl.style.display = viewerEnabled && !n ? "" : "none";
     }
     function escapeHtml(s) {
       return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -197,6 +204,16 @@
         }
         if (d.type === "bans") { renderBans(d.bans || []); return; }
         if (d.error) { aStatus.textContent = d.error; aStatus.className = "err"; return; }
+        if (d.type === "viewer_state") {
+          // Admin turned the live feed on/off. When off, drop all panels and show
+          // the notice; when on, a fresh snapshot follows to repopulate.
+          viewerEnabled = d.enabled;
+          if (!viewerEnabled) {
+            for (const id of Object.keys(panels)) { panels[id].el.remove(); delete panels[id]; }
+          }
+          refresh();
+          return;
+        }
         if (d.type === "snapshot") {
           for (const id of Object.keys(panels)) { panels[id].el.remove(); delete panels[id]; }
           for (const s of d.sessions) { panelFor(s.id, s.flag); setText(s.id, s.text); setScore(s.id, s.score); }

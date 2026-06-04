@@ -23,6 +23,8 @@ const adminUnlock = document.getElementById("adminunlock");
 const adminStatus = document.getElementById("adminstatus");
 const maxTokensInput = document.getElementById("maxtokens");
 const maxTokensApply = document.getElementById("maxtokensapply");
+const viewerToggle = document.getElementById("viewertoggle");
+const rebootBtn = document.getElementById("rebootbtn");
 
 let seq = 0;          // monotonically increasing request id
 let lastRenderedSeq = -1;
@@ -283,6 +285,7 @@ function connect() {
       populateModels(data.models, data.current || data.default);
       setCurrentModel(data.current || data.default);
       if (data.max_tokens) maxTokensInput.value = data.max_tokens;
+      if (typeof data.viewer_enabled === "boolean") viewerToggle.checked = data.viewer_enabled;
       setStatus("connected", "ok");
       send(); // prime predictions for whatever is already in the box
       return;
@@ -290,6 +293,12 @@ function connect() {
     if (data.max_tokens_changed) {
       maxTokensInput.value = data.max_tokens_changed;
       setStatus(`token cap: ${data.max_tokens_changed}`, "ok");
+      return;
+    }
+    if (typeof data.viewer_enabled === "boolean") {
+      // Admin toggled the live conversation viewer (maybe from another panel).
+      viewerToggle.checked = data.viewer_enabled;
+      setStatus(`live viewer ${data.viewer_enabled ? "enabled" : "disabled"}`, "ok");
       return;
     }
     if (data.cleared) {
@@ -309,8 +318,10 @@ function connect() {
       modelSelect.disabled = !unlocked;
       maxTokensInput.disabled = !unlocked;
       maxTokensApply.disabled = !unlocked;
+      viewerToggle.disabled = !unlocked;
+      rebootBtn.disabled = !unlocked;
       adminStatus.textContent = unlocked
-        ? "unlocked — you can switch the model & token cap"
+        ? "unlocked — model, token cap, live viewer & reboot"
         : "wrong password";
       adminStatus.className = "admin-status " + (unlocked ? "ok" : "err");
       return;
@@ -324,6 +335,11 @@ function connect() {
     }
     if (data.status === "loading") {
       setStatus(`loading ${data.model}… (shared by all users; first load downloads weights)`, "");
+      return;
+    }
+    if (data.status === "rebooting") {
+      // Admin kicked a server reboot; the socket will drop and auto-reconnect.
+      setStatus("server rebooting… reconnecting when it's back", "");
       return;
     }
     // Drop out-of-order/stale responses.
@@ -357,6 +373,23 @@ function applyMaxTokens() {
 maxTokensApply.addEventListener("click", applyMaxTokens);
 maxTokensInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") applyMaxTokens();
+});
+
+// Admin: enable/disable the live conversation viewer (affects everyone + the
+// /viewer.html feed). Sent immediately when the checkbox is flipped.
+viewerToggle.addEventListener("change", () => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(
+    JSON.stringify({ set_viewer_enabled: viewerToggle.checked, password: adminPassword })
+  );
+});
+
+// Admin: kill + restart the server process (reloads code + model, drops everyone
+// briefly). Guarded by a confirm since it disrupts all connected users.
+rebootBtn.addEventListener("click", () => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (!confirm("Reboot the server? This kills and restarts the process — it reloads the code and model, and briefly disconnects everyone while the model reloads.")) return;
+  socket.send(JSON.stringify({ reboot: true, password: adminPassword }));
 });
 
 input.addEventListener("input", onInput);
@@ -401,15 +434,77 @@ function connectLogs() {
   ls.onerror = () => (logstatus.textContent = "log stream error");
 }
 
-// --- live GPU monitor (replace each frame; it's a gauge, not a log) -----
-const gputerm = document.getElementById("gputerm");
+// --- live GPU monitor: compact per-GPU readout + a bar chart of util over time.
+//     The server streams a JSON snapshot ~1/s; we keep a rolling history of util
+//     per GPU and redraw the panel each frame.
+const gpuPanel = document.getElementById("gpupanel");
 const gpustatus = document.getElementById("gpustatus");
+const GPU_BAR_W = 22;                // width of the MEM fill bar, in characters
+const GPU_HIST = 32;                 // fixed number of bars in the util time chart
+const SPARK = "▁▂▃▄▅▆▇█";            // 8 levels for the util sparkline
+const gpuHist = {};                  // gpu index -> last GPU_HIST utils (prefilled 0)
+
+function asciiBar(pct) {
+  const v = Math.max(0, Math.min(100, pct || 0));
+  const filled = Math.round((v / 100) * GPU_BAR_W);
+  return "█".repeat(filled) + "░".repeat(GPU_BAR_W - filled);
+}
+
+function sparkline(hist) {
+  return hist
+    .map((u) => {
+      const v = Math.max(0, Math.min(100, u || 0));
+      return SPARK[Math.min(SPARK.length - 1, Math.round((v / 100) * (SPARK.length - 1)))];
+    })
+    .join("");
+}
+
+function renderGpu(data) {
+  if (!data || data.error) {
+    gpuPanel.innerHTML = `<span class="gpu-err">GPU monitor unavailable${data && data.error ? ": " + escapeHtml(data.error) : ""}</span>`;
+    return;
+  }
+  const giB = (x) => (x / 1024).toFixed(1);
+  const blocks = [];
+  for (const g of data.gpus || []) {
+    const util = g.util == null ? 0 : Math.round(g.util);
+    const memPct = g.mem_total ? Math.round((g.mem_used / g.mem_total) * 100) : 0;
+    const pow = g.power != null ? Math.round(g.power) : "?";
+    const powMax = g.power_max != null ? Math.round(g.power_max) : "?";
+    const nproc = (g.procs || []).length;
+
+    // Fixed-size util history (prefilled with zeros so the chart is always 32 wide).
+    const hist = gpuHist[g.index] || (gpuHist[g.index] = Array(GPU_HIST).fill(0));
+    hist.push(util);
+    if (hist.length > GPU_HIST) hist.shift();
+
+    // All GPU info on one line.
+    const head = `GPU ${g.index} · ${g.name || ""} · ${g.temp == null ? "?" : Math.round(g.temp)}°C · ${pow}/${powMax} W · ${nproc} proc`;
+    // MEM: current-usage ASCII fill bar. UTIL: current-usage fill bar PLUS a
+    // fixed 32-bar time sparkline of recent utilisation.
+    const uHue = Math.round(120 * (1 - util / 100));
+    const memBar = `<span class="gbar gbar-mem">${asciiBar(memPct)}</span>`;
+    const utilBar = `<span class="gbar" style="color:hsl(${uHue},65%,55%)">${asciiBar(util)}</span>`;
+    const utilSpark = `<span class="gbar" style="color:hsl(${uHue},65%,55%)">${sparkline(hist)}</span>`;
+    const memLine = `mem  ${memBar} ${String(memPct).padStart(3)}%  ${giB(g.mem_used)}/${giB(g.mem_total)} GiB`;
+    const utilLine = `util ${utilBar} ${String(util).padStart(3)}%`;
+    const sparkLine = `     ${utilSpark}`; // own line, indented to align under the util bar
+    blocks.push(escapeHtml(head) + "\n" + memLine + "\n" + utilLine + "\n" + sparkLine);
+  }
+  gpuPanel.innerHTML = blocks.join("\n\n") || `<span class="gpu-err">(no GPU found)</span>`;
+}
 
 function connectGpu() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const gs = new WebSocket(`${proto}://${location.host}/gpu`);
   gs.onopen = () => (gpustatus.textContent = "live");
-  gs.onmessage = (ev) => (gputerm.textContent = ev.data); // overwrite each frame
+  gs.onmessage = (ev) => {
+    try {
+      renderGpu(JSON.parse(ev.data));
+    } catch {
+      /* ignore malformed frame */
+    }
+  };
   gs.onclose = () => {
     gpustatus.textContent = "disconnected · retrying…";
     setTimeout(connectGpu, 2000);
