@@ -25,6 +25,7 @@ const maxTokensInput = document.getElementById("maxtokens");
 const maxTokensApply = document.getElementById("maxtokensapply");
 const viewerToggle = document.getElementById("viewertoggle");
 const rebootBtn = document.getElementById("rebootbtn");
+const onlineCount = document.getElementById("onlinecount");
 
 let seq = 0;          // monotonically increasing request id
 let lastRenderedSeq = -1;
@@ -286,6 +287,7 @@ function connect() {
       setCurrentModel(data.current || data.default);
       if (data.max_tokens) maxTokensInput.value = data.max_tokens;
       if (typeof data.viewer_enabled === "boolean") viewerToggle.checked = data.viewer_enabled;
+      if (typeof data.online === "number") onlineCount.textContent = data.online;
       setStatus("connected", "ok");
       send(); // prime predictions for whatever is already in the box
       return;
@@ -299,6 +301,11 @@ function connect() {
       // Admin toggled the live conversation viewer (maybe from another panel).
       viewerToggle.checked = data.viewer_enabled;
       setStatus(`live viewer ${data.viewer_enabled ? "enabled" : "disabled"}`, "ok");
+      return;
+    }
+    if (typeof data.online === "number") {
+      // Someone joined/left — update the live online count.
+      onlineCount.textContent = data.online;
       return;
     }
     if (data.cleared) {

@@ -634,9 +634,11 @@ async def ws(socket: WebSocket):
             "models": MODELS, "default": DEFAULT_MODEL,
             "current": manager.desired_name, "max_tokens": Runtime.max_tokens,
             "viewer_enabled": Runtime.viewer_enabled,
+            "online": len(clients),
             "server_id": SERVER_ID,
         })
     )
+    await broadcast({"online": len(clients)})  # tell everyone someone joined
 
     # A forward pass costs far more than a keystroke, so we DON'T run one per
     # keystroke. Instead a reader coroutine ingests every message (doing the cheap
@@ -789,6 +791,7 @@ async def ws(socket: WebSocket):
         clients.discard(socket)
         _session_close(sid)  # close + remove this user's streaming file
         await _viewer_broadcast({"type": "close", "id": sid})
+        await broadcast({"online": len(clients)})  # tell everyone someone left
 
 
 def _gpu_stats() -> dict:

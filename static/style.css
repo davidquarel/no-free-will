@@ -93,6 +93,9 @@ h1 {
 }
 
 .tagline { color: var(--muted); max-width: 64ch; margin: 4px 0 0; font-size: 14px; }
+.online { margin: 4px 0 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.online-dot { color: #56d364; }
+#onlinecount { color: var(--fg); font-weight: 600; }
 .legend { font-weight: 600; }
 .legend.green { color: #56d364; }
 .legend.red { color: #f85149; }
