@@ -168,6 +168,15 @@ main {
   box-shadow: inset 1px 0 0 rgba(230, 237, 243, 0.16);
 }
 
+/* Text past the token cap: dropped before the model ever saw it. Red font + a
+   faint red wash so the truncated tail is unmistakable. Color/background only
+   (no padding/border) so the backdrop stays glyph-aligned with the textarea. */
+.truncated {
+  color: #f85149;
+  background: rgba(248, 81, 73, 0.13);
+  border-radius: 2px;
+}
+
 /* --- side panel --- */
 .panel {
   background: var(--panel);

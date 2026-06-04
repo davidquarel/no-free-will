@@ -30,10 +30,12 @@ let seq = 0;          // monotonically increasing request id
 let lastRenderedSeq = -1;
 let socket = null;
 let lastTokens = [];  // last server-confirmed token render, reused while typing
+let truncBoundary = Infinity;  // char index past which text was dropped at the token cap (Infinity = nothing truncated)
 let currentModel = null;   // the globally-loaded model
 let adminPassword = null;  // set once the admin password is verified
 let lastServerId = null;   // detect a server restart across reconnects
 let banned = false;        // stop reconnecting if we've been IP-banned
+let inactive = false;      // stop reconnecting after an inactivity disconnect (refresh to rejoin)
 
 function escapeHtml(s) {
   return s
@@ -68,6 +70,18 @@ function tokenSpan(t) {
   )}</span>`;
 }
 
+// Markup for the not-yet-tokenized tail starting at char index `from`: the part
+// before the truncation boundary is "pending" (recolors when the next result
+// arrives); the part at/after it is "truncated" — text dropped at the token cap
+// that the model never saw, painted distinctly (red) so the cut point is clear.
+function tailMarkup(text, from) {
+  const b = Math.max(from, Math.min(truncBoundary, text.length));
+  let html = "";
+  if (b > from) html += `<span class="pending">${escapeHtml(text.slice(from, b))}</span>`;
+  if (text.length > b) html += `<span class="truncated">${escapeHtml(text.slice(b))}</span>`;
+  return html;
+}
+
 function renderTyping(text) {
   // Instant keystroke feedback that DOESN'T throw away the highlighting:
   // keep the colored tokens for the prefix the last server result already
@@ -75,7 +89,7 @@ function renderTyping(text) {
   // tail as plain text. The tail re-colors when the next result arrives.
   ghost.textContent = "";
   if (!lastTokens.length) {
-    highlights.textContent = text;
+    highlights.innerHTML = tailMarkup(text, 0);
     return;
   }
   const cached = lastTokens.map((t) => t.text).join("");
@@ -92,7 +106,7 @@ function renderTyping(text) {
     used += t.text.length;
   }
   if (used < text.length) {
-    html += `<span class="pending">${escapeHtml(text.slice(used))}</span>`;
+    html += tailMarkup(text, used);
   }
   highlights.innerHTML = html;
 }
@@ -103,6 +117,12 @@ function renderResult(data) {
   const tokens = data.tokens || [];
   const reconstructed = tokens.map((t) => t.text).join("");
   const current = input.value;
+
+  // The server scores only the first max_tokens tokens; when you typed more, the
+  // scored tokens reconstruct just a prefix and everything past it was dropped.
+  // Record that boundary (in chars) so the tail renders as truncated, not pending.
+  const truncated = data.n_tokens_total > data.max_tokens;
+  truncBoundary = truncated ? reconstructed.length : Infinity;
 
   if (reconstructed === current) {
     highlights.innerHTML = tokens.map(tokenSpan).join("");
@@ -123,7 +143,6 @@ function renderResult(data) {
     input.selectionEnd === current.length;
   // When the text was truncated, the prediction is for the cut point, not the
   // real end — don't show a misleading ghost.
-  const truncated = data.n_tokens_total > data.max_tokens;
   const preds = data.predictions || [];
   ghost.textContent =
     !truncated && atEnd && current.length && preds.length ? preds[0].token : "";
@@ -258,6 +277,7 @@ function connect() {
   socket.onopen = () => setStatus("connected", "ok");
   socket.onclose = () => {
     if (banned) { setStatus("you have been banned", "err"); return; }
+    if (inactive) { setStatus("disconnected for inactivity — refresh the page to rejoin", "err"); return; }
     setStatus("disconnected · retrying…", "err");
     setTimeout(connect, 1500);
   };
@@ -270,6 +290,14 @@ function connect() {
       setStatus("you have been banned", "err");
       input.disabled = true;
       clearEditor();
+      return;
+    }
+    if (data.inactive) {
+      // Server dropped us for inactivity. Stop auto-reconnecting and tell the
+      // user to refresh; keep their text on screen so they can read/copy it.
+      inactive = true;
+      setStatus("disconnected for inactivity — refresh the page to rejoin", "err");
+      input.disabled = true;
       return;
     }
     if (data.error) {
@@ -305,6 +333,7 @@ function connect() {
       // An admin cleared all conversations — wipe this editor too.
       input.value = "";
       lastTokens = [];
+      truncBoundary = Infinity;
       renderTyping("");
       predictionsEl.innerHTML = "";
       accuracyEl.textContent = "—";
@@ -546,6 +575,7 @@ setInterval(checkVersion, 4000);
 function clearEditor() {
   input.value = "";
   lastTokens = [];
+  truncBoundary = Infinity;
   renderTyping("");
   predictionsEl.innerHTML = "";
   accuracyEl.textContent = "—";

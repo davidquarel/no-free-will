@@ -110,18 +110,25 @@ def resolve_quant(name: str) -> str | None:
 # Dynamic-batching knobs (overridable via env).
 BATCH_WINDOW = float(os.environ.get("BATCH_WINDOW_MS", "8")) / 1000.0
 
+# Drop a connection after this many seconds with NO incoming messages (the user
+# stopped typing). They get a "disconnected for inactivity" warning and can
+# refresh to rejoin; their live conversation is removed. 0/blank disables it.
+INACTIVITY_TIMEOUT = float(os.environ.get("INACTIVITY_TIMEOUT_S", "600"))
+
 # --- Adaptive batch/seq sizing to prevent OOM under concurrency ----------------
-# Peak VRAM is governed by B×S (batch × seq-len). Measured ceiling on this 16GB
-# card with gemma-4-12B 8-bit is B×S ≈ SAFE_TOKEN_BUDGET. So instead of a fixed
-# batch, we adapt to the number of connected users: ONE user gets the full
-# seq-len (best context); as more connect we trade seq-len for batch (more users
-# served per forward) while keeping B×S under budget — down to MAX_CONCURRENT
-# users at SAFE_TOKEN_BUDGET/MAX_CONCURRENT tokens each. Beyond that, extra users
-# wait in the queue (first-come, first-served).
-#   1 user  -> B=1, S=2048
-#   2 users -> B=2, S=1024
-#   4 users -> B=4, S=512   (then queue)
-SAFE_TOKEN_BUDGET = int(os.environ.get("SAFE_TOKEN_BUDGET", "2048"))
+# Peak VRAM is governed by B×S (batch × seq-len). 2048 OOM'd on this 16GB card
+# with gemma-4-12B 8-bit, so the budget is 1024 — which is also gemma-4's
+# sliding_window: 40 of its 48 layers are local-attention capped at 1024 tokens,
+# so context past that only reaches the 8 global layers (diminishing returns).
+# Instead of a fixed batch, we adapt to the number of connected users: ONE user
+# gets the full seq-len (best context); as more connect we trade seq-len for batch
+# (more users served per forward) while keeping B×S under budget — down to
+# MAX_CONCURRENT users at SAFE_TOKEN_BUDGET/MAX_CONCURRENT tokens each. Beyond
+# that, extra users wait in the queue (first-come, first-served).
+#   1 user  -> B=1, S=1024
+#   2 users -> B=2, S=512
+#   4 users -> B=4, S=256   (then queue)
+SAFE_TOKEN_BUDGET = int(os.environ.get("SAFE_TOKEN_BUDGET", "1024"))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "4"))
 
 
@@ -696,8 +703,20 @@ async def ws(socket: WebSocket):
 
     async def reader() -> None:
         nonlocal pending
+        idle_timeout = INACTIVITY_TIMEOUT if INACTIVITY_TIMEOUT > 0 else None
         while True:
-            raw = await socket.receive_text()
+            try:
+                raw = await asyncio.wait_for(socket.receive_text(), timeout=idle_timeout)
+            except asyncio.TimeoutError:
+                # No keystrokes for the whole window: warn this user (they can
+                # refresh to rejoin) and drop them. Returning here lets the
+                # handler's finally remove their live conversation from the viewer.
+                try:
+                    await socket.send_text(json.dumps({"inactive": True}))
+                    await socket.close(code=1000)
+                except Exception:
+                    pass
+                return
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
