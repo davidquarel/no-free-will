@@ -109,26 +109,48 @@ class HFPredictor(BasePredictor):
 
         # transformers 5.x renamed `torch_dtype` -> `dtype` (the old name warns).
         common = dict(dtype=dtype, low_cpu_mem_usage=True)
+        # Fast attention: SDPA uses torch's memory-efficient/flash kernels, which
+        # avoid materializing the (B, heads, S, S) score matrix — so attention
+        # memory is ~O(S) instead of O(S²), raising the long-sequence ceiling (and
+        # it's faster). Override with ATTN_IMPL= (e.g. "eager", "flash_attention_2").
+        attn_impl = os.environ.get("ATTN_IMPL", "sdpa")
+        if attn_impl:
+            common["attn_implementation"] = attn_impl
         n_gpus = torch.cuda.device_count() if self.device == "cuda" else 0
 
         if quant_config is not None:
             # Quantized weights are placed by accelerate and can't be .to()'d.
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, quantization_config=quant_config, device_map="auto", **common
-            )
-            self.input_device = "cuda:0"
+            load_kw = dict(quantization_config=quant_config, device_map="auto", **common)
+            move = False
         elif n_gpus > 1:
             # Shard across all visible GPUs (e.g. a 14B model across 4xA4000).
             # device_map="auto" splits layers and moves activations between
             # cards automatically; inputs go to cuda:0.
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, device_map="auto", **common
-            )
-            self.input_device = "cuda:0"
+            load_kw = dict(device_map="auto", **common)
+            move = False
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_name, **common).to(self.device)
-            self.input_device = self.device
+            load_kw = dict(**common)
+            move = True
+        self.input_device = self.device if move else "cuda:0"
+
+        def _load(kw):
+            m = AutoModelForCausalLM.from_pretrained(model_name, **kw)
+            return m.to(self.device) if move else m
+
+        try:
+            self.model = _load(load_kw)
+        except (ValueError, ImportError, RuntimeError) as exc:
+            # Some architectures don't support the requested attention impl —
+            # fall back to the library default rather than failing to load.
+            if "attn_implementation" in load_kw:
+                load_kw.pop("attn_implementation")
+                print(f"[attn_implementation={attn_impl!r} unavailable "
+                      f"({type(exc).__name__}); using default]", flush=True)
+                self.model = _load(load_kw)
+            else:
+                raise
         self.model.eval()
+        self.attn_impl = getattr(self.model.config, "_attn_implementation", "?")
 
         # Beginning-of-sequence handling. We encode content WITHOUT the
         # tokenizer's automatic specials (add_special_tokens=False) and then

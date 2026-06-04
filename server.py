@@ -108,14 +108,35 @@ def resolve_quant(name: str) -> str | None:
 
 
 # Dynamic-batching knobs (overridable via env).
-MAX_BATCH = int(os.environ.get("MAX_BATCH", "8"))
 BATCH_WINDOW = float(os.environ.get("BATCH_WINDOW_MS", "8")) / 1000.0
 
-# Cap on tokens scored per request, to bound VRAM (logits are B×S×vocab). Text
-# beyond it is truncated; the client shows current/max in the status. Adjustable
-# at runtime from the admin panel (clamped to MAX_TOKENS_RANGE).
-MAX_TOKENS_DEFAULT = int(os.environ.get("MAX_TOKENS", "1024"))
-MAX_TOKENS_RANGE = (16, 32768)
+# --- Adaptive batch/seq sizing to prevent OOM under concurrency ----------------
+# Peak VRAM is governed by B×S (batch × seq-len). Measured ceiling on this 16GB
+# card with gemma-4-12B 8-bit is B×S ≈ SAFE_TOKEN_BUDGET. So instead of a fixed
+# batch, we adapt to the number of connected users: ONE user gets the full
+# seq-len (best context); as more connect we trade seq-len for batch (more users
+# served per forward) while keeping B×S under budget — down to MAX_CONCURRENT
+# users at SAFE_TOKEN_BUDGET/MAX_CONCURRENT tokens each. Beyond that, extra users
+# wait in the queue (first-come, first-served).
+#   1 user  -> B=1, S=2048
+#   2 users -> B=2, S=1024
+#   4 users -> B=4, S=512   (then queue)
+SAFE_TOKEN_BUDGET = int(os.environ.get("SAFE_TOKEN_BUDGET", "2048"))
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "4"))
+
+
+def adaptive_config(n_users: int) -> tuple[int, int]:
+    """(batch, seq_len) for the current number of connected users, keeping
+    batch×seq within SAFE_TOKEN_BUDGET so a full batch can't OOM."""
+    b = max(1, min(n_users, MAX_CONCURRENT))
+    s = max(16, SAFE_TOKEN_BUDGET // b)
+    return b, s
+
+
+# Per-request seq cap is the adaptive value, further clamped by the admin ceiling
+# (Runtime.max_tokens). Default ceiling = the top of the ladder (single-user S).
+MAX_TOKENS_DEFAULT = int(os.environ.get("MAX_TOKENS", str(SAFE_TOKEN_BUDGET)))
+MAX_TOKENS_RANGE = (16, SAFE_TOKEN_BUDGET)
 
 # Whether the live conversation viewer (/viewer.html via the /sessions feed) is
 # on by default. Admins can flip this at runtime from the in-page admin panel.
@@ -169,14 +190,22 @@ class ModelManager:
             return await self._ensure_locked()
 
 
+def current_limits() -> tuple[int, int]:
+    """Live (max_batch, max_tokens): adaptive to the connected-user count, with
+    the seq-len further clamped by the admin ceiling (Runtime.max_tokens)."""
+    b, s = adaptive_config(len(clients))
+    return b, min(s, Runtime.max_tokens)
+
+
 class BatchEngine:
     """Coalesces concurrent predict requests into one padded forward pass.
 
-    Each request is parked on a future; a single worker drains the queue,
-    waits a short window for stragglers, then runs up to MAX_BATCH of them
-    through `predict_batch` while holding the model lock (so a switch can't
-    free the weights mid-flight). Batches run one at a time — there is only
-    one GPU — but new requests accumulate while the current batch computes."""
+    Each request is parked on a future; a single worker drains the queue, waits a
+    short window for stragglers, then runs up to the CURRENT adaptive batch size
+    of them through `predict_batch` while holding the model lock (so a switch
+    can't free the weights mid-flight). The batch size and per-request seq cap
+    shrink/grow with the number of connected users to keep B×S under the safe
+    VRAM budget; users beyond the batch size wait in the queue (FCFS)."""
 
     def __init__(self, manager: ModelManager) -> None:
         self.manager = manager
@@ -195,16 +224,18 @@ class BatchEngine:
     async def _run(self) -> None:
         while True:
             batch = [await self.queue.get()]
+            # Adaptive limits for THIS batch, based on how many users are online.
+            max_batch, max_tokens = current_limits()
             if BATCH_WINDOW > 0:
                 await asyncio.sleep(BATCH_WINDOW)  # let concurrent users coalesce
-            while len(batch) < MAX_BATCH and not self.queue.empty():
+            while len(batch) < max_batch and not self.queue.empty():
                 batch.append(self.queue.get_nowait())
 
             reqs = [(t, k) for (t, k, _f) in batch]
             try:
                 async with self.manager.lock:
                     predictor = await self.manager._ensure_locked()
-                    results = await asyncio.to_thread(predictor.predict_batch, reqs, Runtime.max_tokens)
+                    results = await asyncio.to_thread(predictor.predict_batch, reqs, max_tokens)
                 for (_t, _k, fut), res in zip(batch, results):
                     if not fut.done():
                         fut.set_result(res)
@@ -226,6 +257,18 @@ async def broadcast(msg: dict) -> None:
             await ws.send_text(payload)
         except Exception:
             clients.discard(ws)
+
+
+_last_eff_tokens: dict = {"v": None}
+
+
+async def broadcast_limits_if_changed() -> None:
+    """When the connected-user count changes the adaptive seq cap, tell everyone
+    (their token counter shows the new current/max; under load it shrinks)."""
+    eff = current_limits()[1]
+    if eff != _last_eff_tokens["v"]:
+        _last_eff_tokens["v"] = eff
+        await broadcast({"max_tokens_changed": eff})
 
 
 # --- live "conversations": one streaming file per active user, viewable on a
@@ -506,7 +549,7 @@ def config():
         "models": MODELS,
         "default": DEFAULT_MODEL,
         "current": manager.desired_name,
-        "max_tokens": Runtime.max_tokens,
+        "max_tokens": current_limits()[1],  # effective, load-adjusted seq cap
         "viewer_enabled": Runtime.viewer_enabled,
     }
 
@@ -632,11 +675,14 @@ async def ws(socket: WebSocket):
     await socket.send_text(
         json.dumps({
             "models": MODELS, "default": DEFAULT_MODEL,
-            "current": manager.desired_name, "max_tokens": Runtime.max_tokens,
+            "current": manager.desired_name, "max_tokens": current_limits()[1],
             "viewer_enabled": Runtime.viewer_enabled,
             "server_id": SERVER_ID,
         })
     )
+    # A new connection may push us to a smaller seq cap (more users → less S);
+    # let everyone's token counter reflect it.
+    await broadcast_limits_if_changed()
 
     # A forward pass costs far more than a keystroke, so we DON'T run one per
     # keystroke. Instead a reader coroutine ingests every message (doing the cheap
@@ -677,8 +723,9 @@ async def ws(socket: WebSocket):
                     await socket.send_text(json.dumps({"error": "max tokens must be a number"}))
                     continue
                 lo, hi = MAX_TOKENS_RANGE
-                Runtime.max_tokens = max(lo, min(hi, n))
-                await broadcast({"max_tokens_changed": Runtime.max_tokens})
+                Runtime.max_tokens = max(lo, min(hi, n))  # admin ceiling
+                _last_eff_tokens["v"] = None              # force a re-broadcast
+                await broadcast_limits_if_changed()       # effective = min(ceiling, adaptive)
                 continue
 
             # --- admin: turn the live conversation viewer on/off (EVERYONE) ---
@@ -789,6 +836,8 @@ async def ws(socket: WebSocket):
         clients.discard(socket)
         _session_close(sid)  # close + remove this user's streaming file
         await _viewer_broadcast({"type": "close", "id": sid})
+        # Fewer users → the seq cap may rise again; refresh everyone's counter.
+        await broadcast_limits_if_changed()
 
 
 def _gpu_stats() -> dict:
