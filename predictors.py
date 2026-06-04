@@ -107,7 +107,8 @@ class HFPredictor(BasePredictor):
 
             quant_config = BitsAndBytesConfig(load_in_8bit=True)
 
-        common = dict(torch_dtype=dtype, low_cpu_mem_usage=True)
+        # transformers 5.x renamed `torch_dtype` -> `dtype` (the old name warns).
+        common = dict(dtype=dtype, low_cpu_mem_usage=True)
         n_gpus = torch.cuda.device_count() if self.device == "cuda" else 0
 
         if quant_config is not None:

@@ -25,9 +25,31 @@ body {
 header {
   max-width: 1100px;
   margin: 0 auto;
-  padding: 32px 24px 8px;
+  padding: 16px 24px 6px;
   position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
 }
+.header-main { flex: 1; min-width: 0; }
+
+/* score + token count, boxed, in the free space right of the description */
+.header-stats {
+  flex: 0 0 auto;
+  margin-top: 26px;            /* clear the reload pill above it */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 8px 18px;
+}
+.hstat { display: flex; align-items: center; gap: 8px; }
+.hstat-num { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+.hstat-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); line-height: 1.05; }
+.header-stats .tokens { margin: 0; font-size: 12px; }
 
 /* "running the latest code?" pill, top-right of the header */
 .reload {
@@ -47,7 +69,7 @@ header {
 .reload.stale { color: #e3b341; border-color: rgba(227, 179, 65, 0.5); background: rgba(187, 128, 9, 0.12); }
 .reload:hover { filter: brightness(1.15); }
 
-.viewer-link { margin: 4px 0 0; font-size: 13px; }
+.viewer-link { margin: 8px 0 0; font-size: 13px; }
 .viewer-link a { color: var(--accent); text-decoration: none; }
 .viewer-link a:hover { text-decoration: underline; }
 
@@ -56,14 +78,21 @@ header {
 #maxtokensapply { background: #21262d; color: var(--fg); border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
 #maxtokensapply:hover { background: #30363d; }
 #maxtokensapply[disabled], .admin-field input[disabled] { opacity: 0.5; cursor: not-allowed; }
+.admin-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.admin-toggle input { width: auto; cursor: pointer; }
+.admin-toggle input[disabled] { opacity: 0.5; cursor: not-allowed; }
+.admin-toggle a { color: var(--muted); }
+#rebootbtn { background: #2d1518; color: #f0a0a0; border: 1px solid #5c2b2b; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+#rebootbtn:hover { background: #3d1c20; }
+#rebootbtn[disabled] { opacity: 0.5; cursor: not-allowed; }
 
 h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: 22px;
   letter-spacing: -0.02em;
 }
 
-.tagline { color: var(--muted); max-width: 70ch; }
+.tagline { color: var(--muted); max-width: 64ch; margin: 4px 0 0; font-size: 14px; }
 .legend { font-weight: 600; }
 .legend.green { color: #56d364; }
 .legend.red { color: #f85149; }
@@ -71,10 +100,10 @@ h1 {
 main {
   max-width: 1100px;
   margin: 0 auto;
-  padding: 16px 24px 48px;
+  padding: 10px 24px 20px;
   display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 24px;
+  grid-template-columns: 1fr 300px;
+  gap: 16px;
   align-items: start;
 }
 
@@ -82,20 +111,22 @@ main {
   main { grid-template-columns: 1fr; }
 }
 
+.editor-col { min-width: 0; }
+
 /* --- editor: textarea stacked exactly over a styled backdrop --- */
 .editor-wrap {
   position: relative;
   background: var(--panel);
   border: 1px solid #30363d;
   border-radius: 12px;
-  min-height: 420px;
+  min-height: 300px;
 }
 
 #backdrop, #input {
   margin: 0;
   border: 0;
   width: 100%;
-  min-height: 420px;
+  min-height: 300px;
   padding: var(--editor-pad);
   font-family: var(--editor-font);
   font-size: var(--editor-size);
@@ -142,9 +173,9 @@ main {
   background: var(--panel);
   border: 1px solid #30363d;
   border-radius: 12px;
-  padding: 20px;
+  padding: 14px;
   position: sticky;
-  top: 16px;
+  top: 12px;
 }
 
 /* current model (read-only) + password-gated admin panel */
@@ -207,18 +238,14 @@ main {
   font-family: var(--mono);
 }
 
-.stat { text-align: center; padding-bottom: 12px; border-bottom: 1px solid #30363d; }
-.stat-big { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.stat-label { color: var(--muted); font-size: 13px; }
-
-.tokens { text-align: center; font-family: var(--mono); font-size: 13px; color: var(--muted); margin: 10px 0; font-variant-numeric: tabular-nums; }
+.tokens { font-family: var(--mono); font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .tokens.warn { color: #e3b341; }
 
-.status { font-size: 12px; color: var(--muted); margin: 12px 0; font-family: var(--mono); }
+.status { font-size: 12px; color: var(--muted); margin: 8px 0; font-family: var(--mono); }
 .status.ok { color: #56d364; }
 .status.err { color: #f85149; }
 
-h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 16px 0 8px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px; }
 
 .predictions { list-style: none; margin: 0; padding: 0; }
 .predictions li {
@@ -226,10 +253,10 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: 
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  padding: 5px 8px;
+  padding: 3px 8px;
   border-radius: 6px;
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: 13px;
   overflow: hidden;
 }
 .predictions li .bar {
@@ -244,28 +271,30 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 .predictions li .prob { color: var(--muted); font-variant-numeric: tabular-nums; }
 .predictions li:first-child .bar { background: rgba(86, 211, 100, 0.22); }
 
-.settings { margin-top: 20px; color: var(--muted); font-size: 13px; }
-.settings input { width: 56px; background: #0d1117; color: var(--fg); border: 1px solid #30363d; border-radius: 4px; padding: 2px 4px; }
+/* One collapsible panel holding the top-k setting, current model + admin. */
+.settings { margin: 10px 0 0; border: 1px solid #30363d; border-radius: 8px; padding: 8px 10px; background: #0d1117; color: var(--muted); font-size: 13px; }
+.settings > summary { cursor: pointer; font-size: 12px; color: var(--muted); user-select: none; }
+.settings-body { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.topk-field { color: var(--muted); font-size: 13px; }
+.topk-field input { width: 56px; background: #0d1117; color: var(--fg); border: 1px solid #30363d; border-radius: 4px; padding: 2px 4px; }
+.admin-sep { margin-top: 4px; padding-top: 10px; border-top: 1px solid #30363d; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.settings-body .model-current { margin-bottom: 0; }
+.settings-body .model-warning { margin-bottom: 0; }
 
-/* --- live terminals below the editor: GPU monitor + server log --- */
+/* --- live terminals below the editor: server log + GPU monitor, side by side --- */
 .terminals {
   max-width: 1100px;
-  margin: 0 auto 48px;
+  margin: 0 auto 20px;
   padding: 0 24px;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 24px;
+  gap: 16px;
   align-items: start;
 }
 @media (max-width: 820px) {
   .terminals { grid-template-columns: 1fr; }
 }
 .term-col { min-width: 0; }
-.logs {
-  max-width: 1100px;
-  margin: 0 auto 48px;
-  padding: 0 24px;
-}
 .logs-bar {
   display: flex;
   justify-content: space-between;
@@ -274,23 +303,40 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: 
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 .logs-status { text-transform: none; letter-spacing: normal; font-family: var(--mono); }
 .logterm {
   margin: 0;
-  height: 240px;
+  height: 170px;
   overflow-y: auto;
   background: #07090d;
   border: 1px solid #30363d;
   border-radius: 10px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.45;
   color: #8ddb9b;
   white-space: pre-wrap;
   word-break: break-word;
   tab-size: 8;
 }
-.gputerm { color: #58a6ff; }
+
+/* --- compact GPU monitor: one info line + horizontal ASCII bars (util, mem) --- */
+.gpupanel {
+  height: 170px;
+  overflow: auto;
+  background: #07090d;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: pre;
+}
+.gpupanel .gbar { letter-spacing: -0.5px; color: var(--accent); }
+.gpupanel .gbar-mem { color: var(--accent); }
+.gpu-err { color: #f85149; }

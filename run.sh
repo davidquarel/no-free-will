@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
 # Serve the app. Run setup.sh once first to install dependencies.
-# Defaults to Qwen2.5-7B in FULL bf16 (~14GB) — strong and unquantized. Bigger
-# models (8B 8-bit, 14B 4-bit) auto-quantize since that's the only way they fit
-# 16GB; switch models from the in-page admin panel (admin password comes from
-# the ADMIN_PASSWORD env var — see below).
+# Defaults to Gemma 4 12B base, loaded 8-bit (~13GB, near-lossless) so it fits a
+# 16GB card. Other models auto-quantize per their hint (bf16 ≤4B, 8-bit 7–8B);
+# switch models from the in-page admin panel (admin password comes from the
+# ADMIN_PASSWORD env var — see below). Runs via this project's own .venv.
 #
 #   bash run.sh                 # serve on port 8080
 #   bash run.sh --port 9000     # serve on a different port
@@ -19,7 +19,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-7B}"
+MODEL_NAME="${MODEL_NAME:-google/gemma-4-12B}"
 QUANTIZE="${QUANTIZE-}"        # empty = per-model default (bf16 ≤4B, 4-bit for 8B/14B)
 PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
@@ -49,8 +49,12 @@ if [ ! -d .venv ]; then
   exit 1
 fi
 
+# Use THIS project's own venv (isolated from any conda env, e.g. arena-env).
+# It carries the newer transformers (>=5.10, for Gemma 4) without touching other
+# environments. We call its python directly rather than `uv run`, because uv
+# would otherwise prefer an active conda env (CONDA_PREFIX) over .venv.
 SERVE=(env MODEL_NAME="$MODEL_NAME" QUANTIZE="$QUANTIZE" APP_LOG="$LOG_FILE"
-       uv run uvicorn server:app --host "$HOST" --port "$PORT")
+       ./.venv/bin/python -m uvicorn server:app --host "$HOST" --port "$PORT")
 
 echo ">> serving ${MODEL_NAME} (QUANTIZE='${QUANTIZE:-per-model}') on ${HOST}:${PORT}"
 echo ">> logs stream to the terminal AND ${LOG_FILE} (the in-page terminal tails it)"

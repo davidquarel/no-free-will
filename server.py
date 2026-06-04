@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 import urllib.request
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -29,6 +30,19 @@ from fastapi.staticfiles import StaticFiles
 from predictors import build_predictor, free_predictor
 
 app = FastAPI(title="no-free-will")
+
+
+@app.middleware("http")
+async def _no_cache_assets(request, call_next):
+    """Stop the frontend (HTML/JS/CSS) from being cached — by the browser AND by
+    a Cloudflare tunnel, which otherwise caches .js/.css by extension and serves
+    a stale app.js after every deploy. `no-cache` allows efficient 304s via the
+    ETag StaticFiles already sends, while guaranteeing the latest code is used."""
+    resp = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith((".html", ".js", ".css")):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
 
 # Curated base (pretrained, non-instruct) models for next-token prediction on a
 # single 16GB GPU (e.g. 1xA4000). Models up to ~4B run in FULL bf16 precision
@@ -51,11 +65,17 @@ MODELS = [
     {"id": "Qwen/Qwen2.5-7B", "label": "Qwen2.5 7B base · ~14GB bf16 (full precision)"},
     {"id": "tiiuae/Falcon3-7B-Base", "label": "Falcon3 7B base · ~14GB bf16 (full precision)"},
     {"id": "meta-llama/Llama-3.1-8B", "label": "Llama 3.1 8B base · ~8.5GB (8-bit; gated)", "quant": "8bit"},
-    {"id": "google/gemma-4-E4B", "label": "Gemma 4 E4B · experimental (multimodal — may not load)"},
+    # Gemma 4 12B base (the default). It's a multimodal "unified" checkpoint
+    # (Gemma4UnifiedForConditionalGeneration), but transformers maps it under
+    # AutoModelForCausalLM, so the text-only causal-LM path works unchanged.
+    # 24GB in bf16; we load 8-bit (LLM.int8, near-lossless) at ~13GB, which fits a
+    # 16GB card with headroom and keeps next-token calibration far better than
+    # 4-bit. Needs transformers>=5.10 (only in this project's .venv, not arena).
+    {"id": "google/gemma-4-12B", "label": "Gemma 4 12B base · ~13GB (8-bit; multimodal)", "quant": "8bit"},
     {"id": "mock", "label": "Mock (no GPU — UI test)"},
 ]
 
-DEFAULT_MODEL = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B")
+DEFAULT_MODEL = os.environ.get("MODEL_NAME", "google/gemma-4-12B")
 
 # Admin password — taken ONLY from the ADMIN_PASSWORD env var, so it's never
 # hardcoded in source. If it's unset, we generate a random one and write it to
@@ -94,14 +114,21 @@ BATCH_WINDOW = float(os.environ.get("BATCH_WINDOW_MS", "8")) / 1000.0
 # Cap on tokens scored per request, to bound VRAM (logits are B×S×vocab). Text
 # beyond it is truncated; the client shows current/max in the status. Adjustable
 # at runtime from the admin panel (clamped to MAX_TOKENS_RANGE).
-MAX_TOKENS_DEFAULT = int(os.environ.get("MAX_TOKENS", "8192"))
+MAX_TOKENS_DEFAULT = int(os.environ.get("MAX_TOKENS", "1024"))
 MAX_TOKENS_RANGE = (16, 32768)
+
+# Whether the live conversation viewer (/viewer.html via the /sessions feed) is
+# on by default. Admins can flip this at runtime from the in-page admin panel.
+VIEWER_ENABLED_DEFAULT = os.environ.get("VIEWER_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
 
 
 class Runtime:
     """Mutable, admin-adjustable runtime settings (shared by all users)."""
 
     max_tokens = MAX_TOKENS_DEFAULT
+    viewer_enabled = VIEWER_ENABLED_DEFAULT
 
 # File the live in-page log terminal tails. run.sh tees the server's stdout+
 # stderr here (so it captures model-download/load progress too).
@@ -213,6 +240,17 @@ _session_seq = 0
 # the server has restarted (and clear its editor instead of resurrecting text).
 SERVER_ID = os.getpid()
 
+
+def _reboot_server() -> None:
+    """Kill-and-restart this server by re-execing the process in place.
+
+    os.execv replaces the current image with a fresh `python -m uvicorn …` (same
+    PID), so all code AND the model reload — a genuine restart that even picks up
+    edited .py files. The listening socket is close-on-exec, so the port frees and
+    the new uvicorn rebinds; stdout/stderr (and thus run.sh's tee to app.log) are
+    inherited, so logs keep flowing. This never returns."""
+    os.execv(sys.executable, [sys.executable, "-m", "uvicorn", *sys.argv[1:]])
+
 # Bans (admin, from the viewer page). We ban a per-browser client token rather
 # than an IP: it targets the individual browser instead of everyone sharing the
 # IP (NAT/household), and is intentionally evadable (clear storage/incognito) —
@@ -272,10 +310,41 @@ _reset_sessions_dir()
 
 
 async def _viewer_broadcast(event: dict) -> None:
+    # When an admin has turned the live viewer off, stop streaming conversation
+    # data to the feed entirely (open/update/close/score/flag all flow through
+    # here). Control messages to viewers go through their own helpers below.
+    if not Runtime.viewer_enabled:
+        return
     payload = json.dumps(event)
     for v in list(viewers):
         try:
             await v.send_text(payload)
+        except Exception:
+            viewers.discard(v)
+
+
+def _sessions_snapshot() -> dict:
+    """Current state of every active conversation, for a (re)connecting viewer."""
+    return {
+        "type": "snapshot",
+        "sessions": [
+            {"id": sid, "flag": s.get("flag", "🌐"), "text": s["text"], "score": s.get("score")}
+            for sid, s in sessions.items()
+        ],
+    }
+
+
+async def _broadcast_viewer_state() -> None:
+    """Tell every connected viewer whether the live feed is on. On enable, follow
+    immediately with a fresh snapshot so panels repopulate; on disable, the page
+    clears itself and shows an 'off' notice."""
+    state = json.dumps({"type": "viewer_state", "enabled": Runtime.viewer_enabled})
+    snap = json.dumps(_sessions_snapshot()) if Runtime.viewer_enabled else None
+    for v in list(viewers):
+        try:
+            await v.send_text(state)
+            if snap is not None:
+                await v.send_text(snap)
         except Exception:
             viewers.discard(v)
 
@@ -438,6 +507,7 @@ def config():
         "default": DEFAULT_MODEL,
         "current": manager.desired_name,
         "max_tokens": Runtime.max_tokens,
+        "viewer_enabled": Runtime.viewer_enabled,
     }
 
 
@@ -484,13 +554,12 @@ async def sessions_ws(socket: WebSocket):
     open/update/close events as people type and come/go."""
     await socket.accept()
     viewers.add(socket)
-    await socket.send_text(json.dumps({
-        "type": "snapshot",
-        "sessions": [
-            {"id": sid, "flag": s.get("flag", "🌐"), "text": s["text"], "score": s.get("score")}
-            for sid, s in sessions.items()
-        ],
-    }))
+    # If an admin has the live feed turned off, don't reveal conversations — just
+    # tell the page it's disabled (admin unlock / ban management still work).
+    if Runtime.viewer_enabled:
+        await socket.send_text(json.dumps(_sessions_snapshot()))
+    else:
+        await socket.send_text(json.dumps({"type": "viewer_state", "enabled": False}))
     try:
         while True:
             raw = await socket.receive_text()
@@ -564,11 +633,23 @@ async def ws(socket: WebSocket):
         json.dumps({
             "models": MODELS, "default": DEFAULT_MODEL,
             "current": manager.desired_name, "max_tokens": Runtime.max_tokens,
+            "viewer_enabled": Runtime.viewer_enabled,
             "server_id": SERVER_ID,
         })
     )
 
-    try:
+    # A forward pass costs far more than a keystroke, so we DON'T run one per
+    # keystroke. Instead a reader coroutine ingests every message (doing the cheap
+    # per-keystroke work — session file + viewer stream — for all of them) but only
+    # stashes the *latest* prediction request; a worker coroutine runs the model on
+    # whatever the latest text is. When someone types faster than the GPU, the
+    # intermediate prefixes are skipped: the worker always jumps to the newest text
+    # the moment it frees up, instead of grinding through every stale prefix.
+    pending: tuple | None = None   # most recent (text, k, seq) not yet predicted
+    have_req = asyncio.Event()
+
+    async def reader() -> None:
+        nonlocal pending
         while True:
             raw = await socket.receive_text()
             try:
@@ -600,6 +681,30 @@ async def ws(socket: WebSocket):
                 await broadcast({"max_tokens_changed": Runtime.max_tokens})
                 continue
 
+            # --- admin: turn the live conversation viewer on/off (EVERYONE) ---
+            if "set_viewer_enabled" in msg:
+                if msg.get("password") != ADMIN_PASSWORD:
+                    await socket.send_text(
+                        json.dumps({"error": "Wrong admin password — unlock the admin panel to toggle the live viewer."})
+                    )
+                    continue
+                Runtime.viewer_enabled = bool(msg.get("set_viewer_enabled"))
+                await broadcast({"viewer_enabled": Runtime.viewer_enabled})  # sync admin panels
+                await _broadcast_viewer_state()  # flip the /sessions feed for viewers
+                continue
+
+            # --- admin: kill + restart the whole server process (EVERYONE) ---
+            if "reboot" in msg:
+                if msg.get("password") != ADMIN_PASSWORD:
+                    await socket.send_text(
+                        json.dumps({"error": "Wrong admin password — unlock the admin panel to reboot the server."})
+                    )
+                    continue
+                await broadcast({"status": "rebooting"})  # tell everyone before we go
+                # Let the broadcast flush, then re-exec in place (does not return).
+                asyncio.get_event_loop().call_later(0.3, _reboot_server)
+                continue
+
             # --- explicit global model switch: admin-only, changes EVERYONE ---
             if "set_model" in msg:
                 if msg.get("password") != ADMIN_PASSWORD:
@@ -622,14 +727,30 @@ async def ws(socket: WebSocket):
                     await broadcast({"model_switched": name})  # sync everyone's dropdown
                 continue
 
-            # --- prediction on the CURRENT global model (batched) ---
+            # --- prediction request: stream text to the viewer for EVERY keystroke,
+            #     but only queue the latest for the (expensive) forward pass. ---
             text = msg.get("text", "")
             k = int(msg.get("k", 10))
             seq = msg.get("seq")  # echoed back so the client can drop stale results
 
-            # Stream this user's current text to their session file + viewers.
             _session_write(sid, text)
             await _viewer_broadcast({"type": "update", "id": sid, "text": text})
+
+            pending = (text, k, seq)  # overwrite: a newer keystroke supersedes older
+            have_req.set()
+
+    async def worker() -> None:
+        nonlocal pending
+        while True:
+            await have_req.wait()
+            have_req.clear()
+            # Atomic grab (no await between read and reset, so the reader can't
+            # slip a newer value in unnoticed): take the newest request, drop the
+            # rest. Anything typed while we were busy is already coalesced here.
+            req, pending = pending, None
+            if req is None:
+                continue
+            text, k, seq = req
 
             # If the model isn't resident yet, tell this client before it blocks.
             if manager.predictor is None or manager.current_name != manager.desired_name:
@@ -653,54 +774,61 @@ async def ws(socket: WebSocket):
             if sid in sessions:
                 sessions[sid]["score"] = score
             await _viewer_broadcast({"type": "score", "id": sid, "score": score})
+
+    worker_task = asyncio.create_task(worker())
+    try:
+        await reader()  # returns/raises WebSocketDisconnect when the client leaves
     except WebSocketDisconnect:
-        return
+        pass
     finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except (asyncio.CancelledError, Exception):
+            pass
         clients.discard(socket)
         _session_close(sid)  # close + remove this user's streaming file
         await _viewer_broadcast({"type": "close", "id": sid})
 
 
-def _gpu_frame() -> str:
-    """One nvtop-style snapshot via gpustat (nvml). Real nvtop is a TUI and
-    can't be piped to a browser, so we render per-GPU util/mem/temp + a bar +
-    the compute processes ourselves."""
+def _gpu_stats() -> dict:
+    """A compact per-GPU snapshot via gpustat (nvml) as plain JSON. The browser
+    keeps a rolling history and draws a util-over-time bar chart, so we just send
+    the numbers (util/mem/temp/power + top compute processes) each tick."""
     try:
         import gpustat
 
         stats = gpustat.GPUStatCollection.new_query()
-        lines = []
+        gpus = []
         for g in stats.gpus:
-            used, total = int(g.memory_used), int(g.memory_total)
-            frac = used / total if total else 0.0
-            fill = int(frac * 28)
-            bar = "█" * fill + "░" * (28 - fill)
-            util = g.utilization if g.utilization is not None else "?"
-            temp = g.temperature if g.temperature is not None else "?"
-            lines.append(f"GPU {g.index}  {g.entry.get('name', '')}")
-            lines.append(f"  util {str(util):>3}%   temp {str(temp):>3}°C   mem {used:>6} / {total} MiB")
-            lines.append(f"  [{bar}] {frac * 100:4.1f}%")
-            procs = g.processes or []
-            if procs:
-                parts = [
-                    f"{p.get('pid')}:{p.get('gpu_memory_usage', '?')}MiB"
-                    + (f"({p['command']})" if p.get("command") else "")
-                    for p in procs[:6]
-                ]
-                lines.append("  procs  " + "  ".join(parts))
-        return "\n".join(lines) or "(no GPU data)"
+            e = g.entry
+            gpus.append({
+                "index": g.index,
+                "name": e.get("name", ""),
+                "util": g.utilization,
+                "mem_used": int(g.memory_used),
+                "mem_total": int(g.memory_total),
+                "temp": g.temperature,
+                "power": e.get("power.draw"),
+                "power_max": e.get("enforced.power.limit") or e.get("power.limit"),
+                "procs": [
+                    {"pid": p.get("pid"), "mem": p.get("gpu_memory_usage", 0), "cmd": p.get("command", "")}
+                    for p in (g.processes or [])[:5]
+                ],
+            })
+        return {"gpus": gpus}
     except Exception as exc:
-        return f"gpu monitor unavailable: {type(exc).__name__}: {exc}"
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 @app.websocket("/gpu")
 async def gpu(socket: WebSocket):
-    """Push a fresh GPU snapshot ~once a second; the client replaces the panel
-    each frame (a live gauge rather than a scrolling log)."""
+    """Push a compact GPU snapshot ~once a second; the client keeps the history
+    and renders the util-over-time bar chart."""
     await socket.accept()
     try:
         while True:
-            await socket.send_text(await asyncio.to_thread(_gpu_frame))
+            await socket.send_text(json.dumps(await asyncio.to_thread(_gpu_stats)))
             await asyncio.sleep(1.0)
     except (WebSocketDisconnect, RuntimeError):
         return
